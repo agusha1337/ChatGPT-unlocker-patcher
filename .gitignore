@@ -1,0 +1,12 @@
+# PyInstaller & Build
+dist/
+build/
+__pycache__/
+*.spec
+*.pyc
+*.pyo
+*.pyd
+
+# User configs
+.chatgpt_patcher_config.json
+*.bak
