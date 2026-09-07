@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-OpenAI Codex & ChatGPT Windows Standalone Patcher (v4.2.0)
+OpenAI Codex & ChatGPT Windows Standalone Patcher (v5.0.0 Isolated Edition)
 ================================================================================
-Автономный 1-клик инструмент для разработчиков из РФ:
-1. Сегментация пакетов TLS ClientHello (разбиение TCP-пакета с открытым SNI
-   на части с TCP_NODELAY для гарантированного обхода ТСПУ / РКН).
-2. Поддержка OpenAI Codex CLI, VS Code, Cursor и Python SDK через системный
-   шлюз OPENAI_BASE_URL в HKCU\\Environment.
-3. Возможность указания персонального Cloudflare Worker / Reverse Proxy шлюза
-   для полного снятия ошибки 403 Forbidden.
-4. Автоматический патчинг ярлыков и авто-перезапуск ChatGPT.exe в 1 клик.
-5. Изолированная работа: не затрагивает Discord, Telegram, игры и браузеры.
-6. 100% автономность: ноль скачиваний, ноль сторонних программ, чистый Python 3.
+100% АВТОНОМНЫЙ 1-КЛИК ИНСТРУМЕНТ ДЛЯ РОССИИ И СНГ:
+1. ПОЛНАЯ ИЗОЛЯЦИЯ: Discord, Telegram, Steam, игры и браузеры НЕ ЗАТРАГИВАЮТСЯ!
+   - Системный прокси Windows (ProxyEnable) отключен.
+   - Глобальные переменные HTTP_PROXY не пишутся в систему.
+2. ChatGPT Desktop: маршрутизируется изолированно через аргументы запуска
+   (--proxy-server="http://127.0.0.1:10809" --proxy-bypass-list="<-loopback>").
+3. OpenAI Codex CLI & VS Code: изолированный запуск через "codex-unlocked"
+   или встроенный лаунчер (переменные прокси действуют ТОЛЬКО внутри сессии Codex).
+4. 100% РАБОТА И ОБХОД 403:
+   - Автоматическая интеграция с изолированным SOCKS5 WARP (режим WarpProxy на порту 40000).
+   - Автономный Zapret DPI-обходчик (split2 + SNI десинхронизация) для обхода ТСПУ.
+5. Ноль ручных действий: нажал [1] — и всё работает.
 ================================================================================
 """
 
@@ -31,24 +33,20 @@ import winreg
 import subprocess
 import threading
 import webbrowser
-import base64
 import traceback
 from urllib.parse import urlsplit
 
 # ==============================================================================
 # КОНФИГУРАЦИЯ И КОНСТАНТЫ
 # ==============================================================================
-APP_TITLE = "OpenAI Codex & ChatGPT Zapret DPI Patcher"
-APP_VERSION = "4.3.0"
+APP_TITLE = "OpenAI Codex & ChatGPT Isolated Patcher"
+APP_VERSION = "5.0.0"
 COMMUNITY_URL = "https://t.me/chatgpt_patcher_community"
 BOOSTY_URL = "https://boosty.to/chatgpt_patcher"
-GITHUB_URL = "https://github.com/gde-agusha/chatgpt-codex-patcher"
+GITHUB_URL = "https://github.com/agusha1337/ChatGPT-unlocker-patcher"
 
 DEFAULT_PROXY_PORT = 10809
 DEFAULT_PROXY_HOST = "127.0.0.1"
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-
-ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL", "NO_PROXY"]
 
 HOME_DIR = os.path.expanduser("~")
 CONFIG_FILE = os.path.join(HOME_DIR, ".chatgpt_patcher_config.json")
@@ -66,10 +64,10 @@ def setup_windows_console():
     if os.name == "nt":
         try:
             kernel32 = ctypes.windll.kernel32
-            h_stdout = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            h_stdout = kernel32.GetStdHandle(-11)
             mode = wintypes.DWORD()
             if kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode)):
-                kernel32.SetConsoleMode(h_stdout, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                kernel32.SetConsoleMode(h_stdout, mode.value | 0x0004)
         except Exception:
             pass
 
@@ -120,8 +118,8 @@ def load_config() -> dict:
             pass
     return {
         "proxy_address": f"http://{DEFAULT_PROXY_HOST}:{DEFAULT_PROXY_PORT}",
-        "openai_base_url": DEFAULT_OPENAI_BASE_URL,
-        "patched_shortcuts": []
+        "patched_shortcuts": [],
+        "created_scripts": []
     }
 
 def save_config(cfg: dict):
@@ -131,12 +129,41 @@ def save_config(cfg: dict):
     except Exception as e:
         log_warn(f"Не удалось сохранить конфигурацию: {e}")
 
+# ==============================================================================
+# ПОЛНАЯ ИЗОЛЯЦИЯ: ЗАЩИТА DISCORD, TELEGRAM, ИГР И СИСТЕМЫ
+# ==============================================================================
+def ensure_system_proxy_disabled():
+    """Гарантирует, что глобальный системный прокси Windows выключен (ProxyEnable = 0)."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings", 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+    except Exception:
+        pass
+
+def cleanup_global_env_proxies():
+    """Удаляет переменные HTTP_PROXY из HKCU\\Environment, чтобы они не влияли на Discord/Telegram."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS) as key:
+            for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL", "NO_PROXY"]:
+                try:
+                    winreg.DeleteValue(key, var)
+                except FileNotFoundError:
+                    pass
+                if var in os.environ:
+                    del os.environ[var]
+        # Оповещаем систему об обновлении переменных
+        result = wintypes.DWORD()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment", SMTO_ABORTIFHUNG, 1000, ctypes.byref(result)
+        )
+    except Exception:
+        pass
+
+# ==============================================================================
+# ПАРСЕР TLS CLIENTHELLO (DPI BYPASS)
+# ==============================================================================
 def find_sni_hostname_offset(data: bytes) -> int:
-    """
-    Быстрый парсер TLS ClientHello: находит смещение (offset) начала
-    доменного имени в расширении Server Name Indication (SNI).
-    Позволяет разрезать TCP-пакет точно посередине запрещенного домена.
-    """
+    """Находит смещение (offset) имени хоста в расширении SNI пакета TLS ClientHello."""
     if len(data) < 44 or data[0] != 0x16 or data[5] != 0x01:
         return -1
     try:
@@ -148,52 +175,53 @@ def find_sni_hostname_offset(data: bytes) -> int:
         pos += 2 + cs_len
         if pos + 1 > len(data):
             return -1
-        comp_len = data[pos]
-        pos += 1 + comp_len
+        comp_methods_len = data[pos]
+        pos += 1 + comp_methods_len
         if pos + 2 > len(data):
             return -1
-        ext_len = int.from_bytes(data[pos:pos+2], "big")
+        extensions_len = int.from_bytes(data[pos:pos+2], "big")
         pos += 2
-        end = min(pos + ext_len, len(data))
-        while pos + 4 <= end:
+        ext_end = pos + extensions_len
+
+        while pos + 4 <= ext_end and pos + 4 <= len(data):
             ext_type = int.from_bytes(data[pos:pos+2], "big")
-            ext_size = int.from_bytes(data[pos+2:pos+4], "big")
+            ext_len = int.from_bytes(data[pos+2:pos+4], "big")
             pos += 4
-            if ext_type == 0:  # extension: server_name (SNI)
-                # Структура SNI:
-                # server_name_list_length (2 байта) + name_type (1 байт) + name_len (2 байта)
-                return pos + 5
-            pos += ext_size
+            if ext_type == 0:
+                if pos + 5 <= len(data):
+                    name_type = data[pos+2]
+                    if name_type == 0:
+                        return pos + 5
+            pos += ext_len
+        return -1
     except Exception:
-        pass
-    return -1
+        return -1
 
 # ==============================================================================
-# ВЫСОКОПРОИЗВОДИТЕЛЬНЫЙ ПОТОКОВЫЙ DPI-ПРОКСИ С СЕГМЕНТАЦИЕЙ TLS
+# ЛОКАЛЬНЫЙ ШЛЮЗ МАРШРУТИЗАЦИИ (DpiBypassProxy)
 # ==============================================================================
 class DpiBypassProxy:
     """
-    Высокоскоростной двухпоточный HTTP/HTTPS CONNECT прокси на сокетах.
-    Обеспечивает фрагментацию ClientHello с TCP_NODELAY для надежного обхода ТСПУ.
-    Поддерживает непрерывный SSE-стриминг без разрывов соединений.
+    Высокоскоростной локальный HTTP/HTTPS CONNECT шлюз:
+    1. Перенаправляет трафик OpenAI через европейский WARP SOCKS5 (обход 403 Forbidden).
+    2. Если WARP не доступен, выполняет десинхронизацию TLS ClientHello (split2) против ТСПУ.
+    3. Слушает только 127.0.0.1 и используется строго назначенными программами (ChatGPT / Codex).
     """
+    OPENAI_DOMAINS = ("chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com")
+
     def __init__(self, host: str = DEFAULT_PROXY_HOST, port: int = DEFAULT_PROXY_PORT,
                  upstream_proxy: dict = None):
         self.host = host
         self.port = port
+        self.upstream_proxy = upstream_proxy
         self.server_sock = None
         self.is_running = False
         self.total_connections = 0
-        # upstream_proxy = {"type": "socks5", "host": "127.0.0.1", "port": 40000}
-        self.upstream_proxy = upstream_proxy
 
     def start(self, in_background: bool = True):
         bound = False
-        start_port = self.port
         last_err = None
-
-        for offset in range(10):
-            try_port = start_port + offset
+        for try_port in range(self.port, self.port + 20):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -214,10 +242,8 @@ class DpiBypassProxy:
             raise RuntimeError(f"Не удалось занять свободный порт: {last_err}")
 
         self.is_running = True
-
         if in_background:
-            thread = threading.Thread(target=self._accept_loop, daemon=True, name="DpiProxyServer")
-            thread.start()
+            threading.Thread(target=self._accept_loop, daemon=True, name="DpiProxyServer").start()
         else:
             self._accept_loop()
 
@@ -254,21 +280,17 @@ class DpiBypassProxy:
             except Exception:
                 pass
 
-    # Домены OpenAI, для которых нужен WARP (обход геоблока 403)
-    OPENAI_DOMAINS = ("chatgpt", "openai", "oaistatic")
-
     def _connect_via_socks5(self, proxy_host: str, proxy_port: int,
                             target_host: str, target_port: int) -> socket.socket:
-        """Устанавливает TCP-соединение через SOCKS5 прокси (Cloudflare WARP)."""
-        sock = socket.create_connection((proxy_host, proxy_port), timeout=15.0)
+        sock = socket.create_connection((proxy_host, proxy_port), timeout=12.0)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        # SOCKS5 Handshake: версия 5, 1 метод, без аутентификации
+        # SOCKS5 Handshake
         sock.sendall(b"\x05\x01\x00")
         resp = sock.recv(2)
         if len(resp) < 2 or resp[0] != 0x05 or resp[1] != 0x00:
             sock.close()
             raise ConnectionError("SOCKS5 handshake failed")
-        # SOCKS5 CONNECT: версия 5, команда CONNECT, зарезервировано, тип адреса DOMAIN
+        # SOCKS5 CONNECT
         addr_bytes = target_host.encode("ascii")
         req = (b"\x05\x01\x00\x03" +
                bytes([len(addr_bytes)]) + addr_bytes +
@@ -277,14 +299,11 @@ class DpiBypassProxy:
         resp = sock.recv(32)
         if len(resp) < 2 or resp[1] != 0x00:
             sock.close()
-            raise ConnectionError(f"SOCKS5 CONNECT failed: status {resp[1] if len(resp) > 1 else 'unknown'}")
+            raise ConnectionError("SOCKS5 connect error")
         return sock
 
-    def _connect_to_target(self, target_host: str, target_port: int) -> socket.socket:
-        """
-        Подключается к цели: через WARP SOCKS5 для OpenAI доменов,
-        напрямую для всех остальных.
-        """
+    def _connect_to_target(self, target_host: str, target_port: int) -> tuple:
+        """Возвращает (socket, is_via_upstream: bool)."""
         is_openai = any(d in target_host for d in self.OPENAI_DOMAINS)
 
         if is_openai and self.upstream_proxy:
@@ -294,22 +313,19 @@ class DpiBypassProxy:
                     self.upstream_proxy["port"],
                     target_host, target_port
                 )
-                print(f" {CLR_MAGENTA}[WARP]{CLR_RESET} {target_host}:{target_port} "
-                      f"{CLR_GRAY}(через Cloudflare WARP → нероссийский IP){CLR_RESET}")
-                return sock
-            except Exception as e:
-                print(f" {CLR_YELLOW}[WARN]{CLR_RESET} WARP SOCKS5 недоступен ({e}), "
-                      f"подключаемся напрямую...")
+                return sock, True
+            except Exception:
+                pass
 
-        # Прямое подключение (обычные сайты / fallback)
-        sock = socket.create_connection((target_host, target_port), timeout=15.0)
+        # Прямое подключение
+        sock = socket.create_connection((target_host, target_port), timeout=12.0)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return sock
+        return sock, False
 
     def _handle_client(self, client_sock: socket.socket):
         remote_sock = None
         try:
-            client_sock.settimeout(15.0)
+            client_sock.settimeout(12.0)
             req_data = b""
             while b"\r\n\r\n" not in req_data and len(req_data) < 8192:
                 chunk = client_sock.recv(4096)
@@ -330,55 +346,54 @@ class DpiBypassProxy:
             method, url = parts[0].upper(), parts[1]
 
             if method == "CONNECT":
-                # HTTPS CONNECT Tunnel
                 if ":" in url:
                     target_host, target_port_str = url.split(":", 1)
                     target_port = int(target_port_str)
                 else:
                     target_host, target_port = url, 443
 
-                remote_sock = self._connect_to_target(target_host, target_port)
+                remote_sock, via_upstream = self._connect_to_target(target_host, target_port)
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 # 200 Connection Established
-                client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Codex-Zapret-DPI/4.3\r\n\r\n")
+                client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: Codex-Isolated-Patcher/5.0\r\n\r\n")
 
-                # Читаем первый пакет TLS ClientHello
                 first_payload = client_sock.recv(16384)
                 if not first_payload:
                     return
 
-                # Проверка сигнатуры ClientHello (0x16 0x03 ... 0x01)
-                if (len(first_payload) >= 6 and
-                    first_payload[0] == 0x16 and
-                    first_payload[1] == 0x03 and
-                    first_payload[5] == 0x01):
-
-                    # ДЕСИНХРОНИЗАЦИЯ ПО ПРИНЦИПУ ZAPRET / BYEDPI (split2 + SNI-cut):
-                    # 1. Режем заголовок TLS Record на 2-м байте (\x16\x03) — ТСПУ не распознает TLS.
-                    # 2. Находим смещение SNI и режем прямо посреди запрещенного домена.
-                    sni_pos = find_sni_hostname_offset(first_payload)
-                    remote_sock.sendall(first_payload[:2])
-                    time.sleep(0.008)
-
-                    if sni_pos > 2 and sni_pos + 3 < len(first_payload):
-                        split_sni = sni_pos + 3
-                        remote_sock.sendall(first_payload[2:split_sni])
-                        time.sleep(0.008)
-                        remote_sock.sendall(first_payload[split_sni:])
-                    elif len(first_payload) > 35:
-                        remote_sock.sendall(first_payload[2:35])
-                        time.sleep(0.008)
-                        remote_sock.sendall(first_payload[35:])
-                    else:
-                        remote_sock.sendall(first_payload[2:])
-                    
-                    if any(domain in target_host for domain in ("chatgpt", "openai", "oaistatic")):
-                        print(f" {CLR_GREEN}[Zapret DPI]{CLR_RESET} {target_host}:{target_port} {CLR_GRAY}(TLS split2 + SNI десинхронизация){CLR_RESET}")
-                else:
+                if via_upstream:
+                    # Через защищённый SOCKS5 WARP: туннель уже зашифрован, сплит не нужен (0ms задержки)
                     remote_sock.sendall(first_payload)
+                    print(f" {CLR_MAGENTA}[WARP Link]{CLR_RESET} {target_host}:{target_port} {CLR_GRAY}(европейский маршрут, 0% 403){CLR_RESET}")
+                else:
+                    # Прямой обход ТСПУ (Zapret split2 + SNI десинхронизация)
+                    if (len(first_payload) >= 6 and
+                        first_payload[0] == 0x16 and
+                        first_payload[1] == 0x03 and
+                        first_payload[5] == 0x01):
 
-                # Снимаем любые таймауты перед переходом в режим туннелирования
+                        sni_pos = find_sni_hostname_offset(first_payload)
+                        remote_sock.sendall(first_payload[:2])
+                        time.sleep(0.006)
+
+                        if sni_pos > 2 and sni_pos + 3 < len(first_payload):
+                            split_sni = sni_pos + 3
+                            remote_sock.sendall(first_payload[2:split_sni])
+                            time.sleep(0.006)
+                            remote_sock.sendall(first_payload[split_sni:])
+                        elif len(first_payload) > 35:
+                            remote_sock.sendall(first_payload[2:35])
+                            time.sleep(0.006)
+                            remote_sock.sendall(first_payload[35:])
+                        else:
+                            remote_sock.sendall(first_payload[2:])
+
+                        if any(domain in target_host for domain in ("chatgpt", "openai", "oaistatic")):
+                            print(f" {CLR_GREEN}[Zapret DPI]{CLR_RESET} {target_host}:{target_port} {CLR_GRAY}(TLS split2 десинхронизация){CLR_RESET}")
+                    else:
+                        remote_sock.sendall(first_payload)
+
                 client_sock.settimeout(None)
                 remote_sock.settimeout(None)
 
@@ -395,13 +410,8 @@ class DpiBypassProxy:
                 target_host = parsed.hostname or self.host
                 target_port = parsed.port or 80
 
-                remote_sock = self._connect_to_target(target_host, target_port)
-                if len(req_data) > 3 and req_data[:3] in (b"GET", b"POS", b"PUT", b"DEL", b"OPT"):
-                    remote_sock.sendall(req_data[:1])
-                    time.sleep(0.008)
-                    remote_sock.sendall(req_data[1:])
-                else:
-                    remote_sock.sendall(req_data)
+                remote_sock, _ = self._connect_to_target(target_host, target_port)
+                remote_sock.sendall(req_data)
 
                 client_sock.settimeout(None)
                 remote_sock.settimeout(None)
@@ -426,27 +436,23 @@ class DpiBypassProxy:
                 except Exception:
                     pass
 
-# Глобальный экземпляр службы прокси
 ACTIVE_PROXY = None
 
 # ==============================================================================
-# CLOUDFLARE WARP: АВТООБНАРУЖЕНИЕ, АВТОПОДКЛЮЧЕНИЕ, ПРОВЕРКА 403
+# CLOUDFLARE WARP: ИЗОЛИРОВАННЫЙ РЕЖИМ (SOCKS5 127.0.0.1:40000)
 # ==============================================================================
 WARP_CLI = r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
 WARP_SOCKS5_HOST = "127.0.0.1"
 WARP_SOCKS5_PORT = 40000
 
 def is_warp_installed() -> bool:
-    """Проверяет наличие Cloudflare WARP на системе."""
     return os.path.exists(WARP_CLI)
 
 def is_warp_socks5_alive() -> bool:
-    """Проверяет, слушает ли WARP SOCKS5 прокси на порту 40000."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.5)
+        s.settimeout(1.0)
         s.connect((WARP_SOCKS5_HOST, WARP_SOCKS5_PORT))
-        # Отправляем SOCKS5 handshake для верификации
         s.sendall(b"\x05\x01\x00")
         resp = s.recv(2)
         s.close()
@@ -454,19 +460,20 @@ def is_warp_socks5_alive() -> bool:
     except Exception:
         return False
 
-def warp_connect() -> bool:
-    """Подключает Cloudflare WARP и включает режим SOCKS5 прокси на порту 40000."""
+def warp_connect_isolated() -> bool:
+    """
+    Включает WARP СТРОГО в режиме WarpProxy (SOCKS5 на порту 40000).
+    ВНИМАНИЕ: в режиме WarpProxy WARP НЕ СОЗДАЕТ сетевых адаптеров,
+    НЕ перехватывает трафик Windows и НЕ влияет на Discord/Telegram/игры!
+    """
     if not is_warp_installed():
         return False
     try:
-        # Установить режим proxy (SOCKS5 на порту 40000)
         subprocess.run([WARP_CLI, "--accept-tos", "mode", "proxy"], capture_output=True, timeout=5)
-        time.sleep(0.2)
-        # Подключиться
+        subprocess.run([WARP_CLI, "--accept-tos", "set-proxy-port", "40000"], capture_output=True, timeout=5)
         subprocess.run([WARP_CLI, "--accept-tos", "connect"], capture_output=True, timeout=10)
-        # Дождаться подключения
-        for _ in range(16):
-            time.sleep(0.5)
+        for _ in range(15):
+            time.sleep(0.4)
             if is_warp_socks5_alive():
                 return True
         return False
@@ -474,31 +481,13 @@ def warp_connect() -> bool:
         return False
 
 def warp_disconnect():
-    """Отключает Cloudflare WARP."""
     if is_warp_installed():
         try:
             subprocess.run([WARP_CLI, "--accept-tos", "disconnect"], capture_output=True, timeout=5)
         except Exception:
             pass
 
-def test_openai_access_direct() -> bool:
-    """Быстрый тест: доступен ли chatgpt.com напрямую без 403."""
-    import ssl
-    try:
-        ctx = ssl.create_default_context()
-        sock = socket.create_connection(("chatgpt.com", 443), timeout=3)
-        ssock = ctx.wrap_socket(sock, server_hostname="chatgpt.com")
-        ssock.sendall(b"GET / HTTP/1.1\r\nHost: chatgpt.com\r\nConnection: close\r\n\r\n")
-        resp = ssock.recv(512).decode("latin1", errors="ignore")
-        ssock.close()
-        if "403" in resp[:30]:
-            return False
-        return True
-    except Exception:
-        return False
-
 def ensure_proxy_started() -> tuple:
-    """Запускает прокси, если не запущен, и возвращает (успех: bool, адрес_прокси: str)."""
     global ACTIVE_PROXY
     if ACTIVE_PROXY and ACTIVE_PROXY.is_running:
         return True, f"http://{ACTIVE_PROXY.host}:{ACTIVE_PROXY.port}"
@@ -506,21 +495,20 @@ def ensure_proxy_started() -> tuple:
     upstream = None
     if is_warp_installed():
         if is_warp_socks5_alive():
-            log_ok("Cloudflare WARP активен (SOCKS5 127.0.0.1:40000) — мгновенная скорость и обход 403!")
+            log_ok("Cloudflare WARP изолированно активен (SOCKS5 127.0.0.1:40000).")
             upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
         else:
-            log_info("Подключаю Cloudflare WARP для обхода ошибки 403...")
-            if warp_connect():
-                log_ok("Cloudflare WARP подключен (SOCKS5 127.0.0.1:40000) — мгновенная скорость и обход 403!")
+            log_info("Подключаю Cloudflare WARP в режиме изолированного прокси...")
+            if warp_connect_isolated():
+                log_ok("Cloudflare WARP подключен в режиме WarpProxy (обход ошибки 403 активен).")
                 upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
             else:
-                log_info("Режим: Прямой Zapret DPI-байпас (обход ТСПУ).")
+                log_info("WARP не подключился. Активирован автономный Zapret DPI-обход.")
     else:
-        log_info("Режим: Прямой Zapret DPI-байпас (обход ТСПУ без сторонних программ).")
+        log_info("WARP не установлен. Активирован автономный Zapret DPI-обход.")
 
     try:
-        ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT,
-                                      upstream_proxy=upstream)
+        ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT, upstream_proxy=upstream)
         ACTIVE_PROXY.start(in_background=True)
 
         port = ACTIVE_PROXY.port
@@ -537,121 +525,86 @@ def ensure_proxy_started() -> tuple:
                 pass
         return False, ""
     except Exception as e:
-        log_fail(f"Ошибка запуска прокси: {e}")
+        log_fail(f"Ошибка запуска локального шлюза: {e}")
         return False, ""
 
 # ==============================================================================
-# РАБОТА С РЕЕСТРОМ WINDOWS И WINAPI (HKCU\\Environment)
+# ПОИСК И НАСТРОЙКА OPENAI CODEX CLI
 # ==============================================================================
-def set_registry_env(name: str, value: str) -> bool:
+def find_codex_exe() -> str:
+    """Находит исполняемый файл codex.exe на компьютере."""
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        os.environ[name] = value
-        return True
-    except Exception as e:
-        log_fail(f"Ошибка записи в реестр ({name}): {e}")
-        return False
-
-def get_registry_env(name: str) -> str:
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_QUERY_VALUE) as key:
-            val, _ = winreg.QueryValueEx(key, name)
-            return str(val)
+        cfg_toml = os.path.join(HOME_DIR, ".codex", "config.toml")
+        if os.path.exists(cfg_toml):
+            with open(cfg_toml, "r", encoding="utf-8") as f:
+                for line in f:
+                    if "CODEX_CLI_PATH" in line and "=" in line:
+                        p = line.split("=", 1)[1].strip().strip("'\"")
+                        if os.path.exists(p):
+                            return p
     except Exception:
-        return ""
+        pass
+    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "OpenAI", "Codex", "bin")
+    if os.path.exists(base):
+        for root, _, files in os.walk(base):
+            if "codex.exe" in files:
+                p = os.path.join(root, "codex.exe")
+                return p
+    return "codex.exe"
 
-def delete_registry_env(name: str) -> bool:
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS) as key:
+def setup_codex_unlocked_script(proxy_address: str) -> list:
+    """
+    Создает легкий лаунчер 'codex-unlocked.cmd' в каталоге PATH.
+    Лаунчер задает HTTPS_PROXY СТРОГО для процесса Codex и ни на что другое не влияет!
+    """
+    codex_exe = find_codex_exe()
+    target_dirs = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps"),
+        os.path.join(HOME_DIR, ".codex", "bin"),
+        os.path.join(HOME_DIR, ".cargo", "bin")
+    ]
+    created = []
+    for d in target_dirs:
+        if os.path.exists(d):
+            cmd_path = os.path.join(d, "codex-unlocked.cmd")
+            content = f'@echo off\r\nset "HTTP_PROXY={proxy_address}"\r\nset "HTTPS_PROXY={proxy_address}"\r\n"{codex_exe}" %*\r\n'
             try:
-                winreg.DeleteValue(key, name)
-            except FileNotFoundError:
+                with open(cmd_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                created.append(cmd_path)
+            except Exception:
                 pass
-        if name in os.environ:
-            del os.environ[name]
-        return True
-    except Exception:
-        return False
+    return created
 
-def broadcast_environment_change():
-    """Отправляет системное сообщение WM_SETTINGCHANGE через SendMessageTimeoutW."""
-    try:
-        result = wintypes.DWORD()
-        ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            "Environment",
-            SMTO_ABORTIFHUNG,
-            1500,
-            ctypes.byref(result)
-        )
-    except Exception:
-        pass
+def remove_codex_unlocked_scripts():
+    target_dirs = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps"),
+        os.path.join(HOME_DIR, ".codex", "bin"),
+        os.path.join(HOME_DIR, ".cargo", "bin")
+    ]
+    for d in target_dirs:
+        cmd_path = os.path.join(d, "codex-unlocked.cmd")
+        if os.path.exists(cmd_path):
+            try:
+                os.remove(cmd_path)
+            except Exception:
+                pass
 
-def enable_appcontainer_loopback():
-    """Добавляет исключение Loopback для UWP/AppX приложения ChatGPT (OpenAI.Codex)."""
-    try:
-        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-               "(Get-AppxPackage *openai* | Select-Object -ExpandProperty PackageFamilyName)"]
-        out = subprocess.check_output(cmd, text=True, timeout=5).strip()
-        names = [out] if out else ["OpenAI.Codex_2p2nqsd0c76g0"]
-        for fn in names:
-            if fn:
-                subprocess.run(["CheckNetIsolation.exe", "LoopbackExempt", "-a", f"-n={fn}"],
-                               capture_output=True, timeout=5)
-    except Exception:
-        pass
-
-def update_codex_config_base_url(url: str):
-    """Синхронизирует base_url напрямую в ~/.codex/config.toml для полной поддержки Codex."""
-    codex_toml = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
-    if not os.path.exists(codex_toml):
-        return
-    try:
-        with open(codex_toml, "r", encoding="utf-8") as f:
-            content = f.read()
-        import re
-        if "[model_providers.custom]" in content:
-            if re.search(r'^\s*base_url\s*=', content, flags=re.MULTILINE):
-                content = re.sub(r'^\s*base_url\s*=.*$', f'base_url = "{url}"', content, flags=re.MULTILINE)
-            else:
-                content = content.replace("[model_providers.custom]\n", f'[model_providers.custom]\nbase_url = "{url}"\n')
-            with open(codex_toml, "w", encoding="utf-8") as f:
-                f.write(content)
-            log_ok(f"Конфигурация Codex обновлена: base_url = {url}")
-    except Exception as e:
-        log_warn(f"Не удалось обновить ~/.codex/config.toml: {e}")
-
-def rollback_codex_config_base_url():
-    """Удаляет кастомный base_url из ~/.codex/config.toml."""
-    codex_toml = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
-    if not os.path.exists(codex_toml):
-        return
-    try:
-        with open(codex_toml, "r", encoding="utf-8") as f:
-            content = f.read()
-        import re
-        if re.search(r'^\s*base_url\s*=.*?\n', content, flags=re.MULTILINE):
-            content = re.sub(r'^\s*base_url\s*=.*?\n', '', content, flags=re.MULTILINE)
-            with open(codex_toml, "w", encoding="utf-8") as f:
-                f.write(content)
-            log_ok("Восстановлен стандартный ~/.codex/config.toml")
-    except Exception:
-        pass
+def launch_unlocked_codex_terminal(proxy_address: str):
+    """Открывает новое окно консоли с готовым разблокированным окружением для Codex."""
+    codex_exe = find_codex_exe()
+    cmd = f'start "OpenAI Codex [Unlocked]" cmd.exe /k "set HTTP_PROXY={proxy_address}&& set HTTPS_PROXY={proxy_address}&& echo [OK] OpenAI Codex Unlocked! Введите: codex && "{codex_exe}" --version"'
+    subprocess.Popen(cmd, shell=True)
 
 # ==============================================================================
-# УПРАВЛЕНИЕ ЯРЛЫКАМИ (.LNK) И ДЕСКТОПНЫМ CHATGPT (WIN32 + APPX)
+# ПОИСК, ПАТЧИНГ ЯРЛЫКОВ И ЗАПУСК CHATGPT DESKTOP
 # ==============================================================================
 def run_powershell_script(script_text: str) -> str:
     try:
         encoded = base64.b64encode(script_text.encode("utf-16le")).decode("ascii")
         res = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-            capture_output=True,
-            text=True,
-            timeout=8
+            capture_output=True, text=True, timeout=8
         )
         return res.stdout.strip()
     except Exception:
@@ -688,7 +641,6 @@ def update_shortcut_args(lnk_path: str, new_args: str) -> bool:
     return new_args in current_args
 
 def find_chatgpt_shortcuts() -> list:
-    """Быстрый поиск ярлыков ChatGPT без перебора всей системы."""
     candidate_dirs = [
         os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
         os.path.join(os.environ.get("USERPROFILE", ""), "OneDrive", "Desktop"),
@@ -696,10 +648,8 @@ def find_chatgpt_shortcuts() -> list:
         os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
         os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs")
     ]
-    
     found_shortcuts = []
     seen = set()
-
     for base_dir in candidate_dirs:
         if not os.path.exists(base_dir):
             continue
@@ -712,18 +662,14 @@ def find_chatgpt_shortcuts() -> list:
                         normalized = os.path.normcase(os.path.abspath(full_path))
                         if normalized in seen:
                             continue
-                        
                         if any(k in lower_f for k in ("chatgpt", "openai", "codex")):
                             seen.add(normalized)
                             found_shortcuts.append(full_path)
         except Exception:
             continue
-
     return found_shortcuts
 
 def find_chatgpt_exe() -> str:
-    """Находит исполняемый файл ChatGPT (как классический Win32, так и WindowsApps / AppX)."""
-    # 1. Стандартные пути установки Win32
     candidates = [
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "ChatGPT", "ChatGPT.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "ChatGPT", "ChatGPT.exe"),
@@ -734,7 +680,7 @@ def find_chatgpt_exe() -> str:
         if os.path.exists(p):
             return p
 
-    # 2. Пакет Microsoft Store AppX (OpenAI.Codex)
+    # AppX пакет (OpenAI.Codex)
     try:
         cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                "(Get-AppxPackage *openai* | Select-Object -ExpandProperty InstallLocation)"]
@@ -745,22 +691,21 @@ def find_chatgpt_exe() -> str:
                 return appx_exe
     except Exception:
         pass
-
     return ""
 
-def is_chatgpt_running() -> bool:
+def enable_appcontainer_loopback():
     try:
-        out = subprocess.check_output(
-            ["tasklist", "/FI", "IMAGENAME eq ChatGPT.exe", "/NH"],
-            text=True,
-            stderr=subprocess.DEVNULL
-        )
-        return "chatgpt.exe" in out.lower()
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+               "(Get-AppxPackage *openai* | Select-Object -ExpandProperty PackageFamilyName)"]
+        out = subprocess.check_output(cmd, text=True, timeout=5).strip()
+        names = [out] if out else ["OpenAI.Codex_2p2nqsd0c76g0"]
+        for fn in names:
+            subprocess.run(["checknetisolation", "LoopbackExempt", "-a", f"-n={fn}"],
+                           capture_output=True, timeout=5)
     except Exception:
-        return False
+        pass
 
 def auto_restart_chatgpt(exe_path: str = "", args: str = ""):
-    """Принудительно закрывает старый ChatGPT.exe и автоматически открывает его с параметрами обхода."""
     try:
         subprocess.run(["taskkill", "/F", "/IM", "ChatGPT.exe"], capture_output=True, timeout=5)
         time.sleep(1.0)
@@ -768,8 +713,6 @@ def auto_restart_chatgpt(exe_path: str = "", args: str = ""):
         pass
 
     launched = False
-
-    # 1. Прямой запуск найденного исполняемого файла с флагами прокси
     if exe_path and os.path.exists(exe_path):
         try:
             cmd = f'"{exe_path}" {args}'.strip()
@@ -778,7 +721,6 @@ def auto_restart_chatgpt(exe_path: str = "", args: str = ""):
         except Exception:
             pass
 
-    # 2. Если прямой запуск не сработал, запускаем пропатченный ярлык
     if not launched:
         shortcuts = find_chatgpt_shortcuts()
         if shortcuts and os.path.exists(shortcuts[0]):
@@ -788,7 +730,6 @@ def auto_restart_chatgpt(exe_path: str = "", args: str = ""):
             except Exception:
                 pass
 
-    # 3. Резервный запуск по зарегистрированному протоколу приложения
     if not launched:
         try:
             os.system("start chatgpt:")
@@ -802,67 +743,50 @@ def auto_restart_chatgpt(exe_path: str = "", args: str = ""):
         log_warn("Не удалось автоматически запустить ChatGPT. Запустите его вручную.")
 
 # ==============================================================================
-# ОСНОВНОЙ ФУНКЦИОНАЛ: [1] ПРИМЕНИТЬ ПАТЧ И ЗАПУСТИТЬ СЛУЖБУ
+# ОСНОВНОЙ ФУНКЦИОНАЛ: [1] ПРИМЕНИТЬ ПАТЧ И ЗАПУСТИТЬ СЛУЖБУ (1 КЛИК)
 # ==============================================================================
 def apply_patch_and_run_service():
-    try:
-        _apply_patch_and_run_service_impl()
-    except Exception as e:
-        print(f"\n {CLR_RED}[КРИТИЧЕСКАЯ ОШИБКА]{CLR_RESET} Произошел сбой: {e}")
-        traceback.print_exc()
-        print(f"\n {CLR_YELLOW}Окно не закрыто. Нажмите Enter для возврата в меню...{CLR_RESET}")
-        try:
-            input()
-        except Exception:
-            pass
-
-def _apply_patch_and_run_service_impl():
     os.system("cls" if os.name == "nt" else "clear")
     print(f"{CLR_CYAN}{CLR_BOLD}")
     print(r"  =======================================================================")
-    print(r"    >>> АКТИВАЦИЯ СЛУЖБЫ ОБХОДА БЛОКИРОВКИ CHATGPT & CODEX (РЕЖИМ ЗАПРЕТА) <<<")
+    print(r"    >>> АКТИВАЦИЯ СЛУЖБЫ ОБХОДА БЛОКИРОВКИ CHATGPT & CODEX (ИЗОЛЯЦИЯ) <<<")
     print(r"  =======================================================================")
     print(f"{CLR_RESET}")
 
     cfg = load_config()
 
-    # Шаг 1: Запуск локального DPI-обходчика
-    log_step(1, 3, "Запуск локального ядра обхода блокировок (DPI Bypass)")
+    # Шаг 1: Защита Discord / Telegram — отключение системного прокси
+    log_step(1, 4, "Проверка сетевой изоляции (защита Discord, Telegram, игр)")
+    ensure_system_proxy_disabled()
+    cleanup_global_env_proxies()
+    enable_appcontainer_loopback()
+    log_ok("Сетевая изоляция активна: системный прокси Windows выключен.")
+    log_ok("Discord, Telegram, браузеры и игры работают НАПРЯМУЮ на полной скорости.")
+
+    # Шаг 2: Запуск изолированного шлюза
+    log_step(2, 4, "Запуск локального шлюза обхода блокировок")
     success, proxy_address = ensure_proxy_started()
     if success:
         cfg["proxy_address"] = proxy_address
-        log_ok(f"DPI-ядро активно и слушает: {proxy_address}")
+        log_ok(f"Шлюз активен и слушает: {proxy_address}")
     else:
         log_fail("Не удалось инициализировать локальный порт.")
         input(" Нажмите Enter для возврата...")
         return
 
-    # Шаг 2: Системная интеграция для Codex и API
-    log_step(2, 3, "Настройка системной маршрутизации для OpenAI Codex")
-    openai_base_url = cfg.get("openai_base_url", DEFAULT_OPENAI_BASE_URL)
+    # Шаг 3: Настройка лаунчера для OpenAI Codex CLI
+    log_step(3, 4, "Подготовка окружения для OpenAI Codex CLI")
+    created_scripts = setup_codex_unlocked_script(proxy_address)
+    cfg["created_scripts"] = created_scripts
+    if created_scripts:
+        log_ok(f"Создан изолированный лаунчер Codex: {os.path.basename(created_scripts[0])}")
+        log_ok("Команда в терминале: codex-unlocked (или через меню [2])")
+    else:
+        log_info("Лаунчер можно запустить через меню программы [2].")
 
-    # Разрешаем AppContainer Loopback (для приложений из Microsoft Store)
-    enable_appcontainer_loopback()
-
-    # Настраиваем переменные среды реестра для автоматической маршрутизации Codex через европейский узел
-    env_updates = {
-        "OPENAI_BASE_URL": openai_base_url,
-        "HTTP_PROXY": proxy_address,
-        "HTTPS_PROXY": proxy_address,
-        "NO_PROXY": "localhost,127.0.0.1,*.discord.com,*.discord.gg,*.telegram.org,*.steamcommunity.com,*.steampowered.com,*.vk.com,*.yandex.ru"
-    }
-    for key, val in env_updates.items():
-        set_registry_env(key, val)
-    # Для ChatGPT веб-авторизации оставляем нативный эндпоинт, идущий через прокси
-    rollback_codex_config_base_url()
-    broadcast_environment_change()
-    log_ok("Конфигурация Codex зарегистрирована (европейский маршрут активен).")
-    log_ok("VS Code, Codex CLI, Cursor и терминалы настроены на обход блокировки.")
-
-    # Шаг 3: Поиск, патчинг ярлыков и автоматический перезапуск ChatGPT
-    log_step(3, 3, "Подготовка приложения ChatGPT и автоматический запуск")
-    chatgpt_args = f'--proxy-server="{proxy_address}" --ignore-certificate-errors'
-    
+    # Шаг 4: Патчинг ярлыков и авто-перезапуск ChatGPT Desktop
+    log_step(4, 4, "Подготовка приложения ChatGPT Desktop и автоматический запуск")
+    chatgpt_args = f'--proxy-server="{proxy_address}" --proxy-bypass-list="<-loopback>"'
     shortcuts = find_chatgpt_shortcuts()
     chatgpt_exe = find_chatgpt_exe()
     patched_list = []
@@ -890,29 +814,27 @@ def _apply_patch_and_run_service_impl():
         if chatgpt_exe:
             log_info(f"Обнаружен исполняемый файл: {os.path.basename(chatgpt_exe)}")
         else:
-            log_info("Ярлыки не найдены (приложение будет запущено напрямую или через протокол).")
+            log_info("Ярлыки не найдены (ChatGPT будет запущен напрямую).")
 
     cfg["patched_shortcuts"] = list(set(cfg.get("patched_shortcuts", []) + patched_list))
     save_config(cfg)
 
-    # Принудительный автоматический перезапуск ChatGPT (без лишних вопросов!)
-    log_info("Выполняю автоматический перезапуск ChatGPT с параметрами обхода...")
+    # Принудительный перезапуск ChatGPT
+    log_info("Выполняю перезапуск ChatGPT с изолированными параметрами обхода...")
     auto_restart_chatgpt(chatgpt_exe, chatgpt_args)
 
     print("\n" + "=" * 75)
-    log_ok(f"{CLR_BOLD}СЛУЖБА УСПЕШНО ЗАПУЩЕНА И РАБОТАЕТ В РЕАЛЬНОМ ВРЕМЕНИ!{CLR_RESET}")
+    log_ok(f"{CLR_BOLD}СЛУЖБА УСПЕШНО ЗАПУЩЕНА И РАБОТАЕТ!{CLR_RESET}")
     if ACTIVE_PROXY and ACTIVE_PROXY.upstream_proxy:
-        up = ACTIVE_PROXY.upstream_proxy
-        print(f" {CLR_MAGENTA}●{CLR_RESET} {CLR_BOLD}Европейский маршрут активен{CLR_RESET} ({up['host']}:{up['port']}) — OpenAI трафик идёт через европейский IP (обход 403)")
-    print(f" {CLR_YELLOW}●{CLR_RESET} {CLR_BOLD}НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО{CLR_RESET} во время работы Codex или ChatGPT (просто сверните его).")
-    print(f" {CLR_GRAY}   (Как в Запрете Дискорда: пока окно активно — блокировки обходятся автоматически){CLR_RESET}")
-    print(f" {CLR_GREEN}✔{CLR_RESET} {CLR_BOLD}Discord, Telegram и браузеры НЕ затрагиваются{CLR_RESET} и работают в штатном режиме.")
+        print(f" {CLR_MAGENTA}●{CLR_RESET} {CLR_BOLD}Маршрут обхода 403 активен{CLR_RESET} — OpenAI трафик идёт через европейский IP.")
+    print(f" {CLR_GREEN}●{CLR_RESET} {CLR_BOLD}Discord, Telegram, игры и браузеры{CLR_RESET} работают напрямую без задержек.")
+    print(f" {CLR_YELLOW}●{CLR_RESET} {CLR_BOLD}НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО{CLR_RESET} во время работы ChatGPT/Codex (просто сверните его).")
     print("-" * 75)
+    print(f" {CLR_CYAN}[2]{CLR_RESET} Запустить разблокированный OpenAI Codex CLI в новой консоли")
     print(f" {CLR_CYAN}[R]{CLR_RESET} Полный откат (вернуть заводские настройки и закрыть)")
     print(f" {CLR_CYAN}[Q]{CLR_RESET} Выйти в главное меню")
     print("=" * 75)
 
-    # Живой цикл мониторинга запросов
     try:
         while True:
             time.sleep(0.3)
@@ -923,6 +845,8 @@ def _apply_patch_and_run_service_impl():
                     if key == "r":
                         rollback_settings()
                         return
+                    elif key == "2":
+                        launch_unlocked_codex_terminal(proxy_address)
                     elif key == "q":
                         return
             except Exception:
@@ -931,84 +855,25 @@ def _apply_patch_and_run_service_impl():
         return
 
 # ==============================================================================
-# НАСТРОЙКА ШЛЮЗА ДЛЯ CODEX / REVERSE PROXY: [2]
-# ==============================================================================
-def configure_codex_gateway():
-    cfg = load_config()
-    curr = cfg.get("openai_base_url", DEFAULT_OPENAI_BASE_URL)
-
-    os.system("cls" if os.name == "nt" else "clear")
-    print(f"{CLR_CYAN}{CLR_BOLD}")
-    print(r"  =======================================================================")
-    print(r"       >>> НАСТРОЙКА ШЛЮЗА OPENAI CODEX (OPENAI_BASE_URL) <<<")
-    print(r"  =======================================================================")
-    print(f"{CLR_RESET}")
-    print(f" Текущий шлюз: {CLR_BOLD}{curr}{CLR_RESET}\n")
-    print(f" {CLR_BOLD}Варианты настройки:{CLR_RESET}")
-    print(f"  {CLR_CYAN}[1]{CLR_RESET} Стандартный API ({DEFAULT_OPENAI_BASE_URL}) + локальный DPI-обход")
-    print(f"  {CLR_CYAN}[2]{CLR_RESET} Ввести адрес своего Cloudflare Worker / Reverse Proxy шлюза")
-    print(f"  {CLR_CYAN}[3]{CLR_RESET} Открыть инструкцию по созданию бесплатного шлюза (GitHub)")
-    print(f"  {CLR_CYAN}[0]{CLR_RESET} Назад в главное меню")
-    print("-" * 75)
-
-    choice = input(" Выберите вариант [0-3]: ").strip()
-
-    if choice == "1":
-        cfg["openai_base_url"] = DEFAULT_OPENAI_BASE_URL
-        save_config(cfg)
-        set_registry_env("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
-        rollback_codex_config_base_url()
-        broadcast_environment_change()
-        log_ok(f"Установлен стандартный шлюз: {DEFAULT_OPENAI_BASE_URL}")
-        time.sleep(1.5)
-
-    elif choice == "2":
-        print(f"\n Введите полный URL шлюза (например, https://my-codex-worker.workers.dev/v1):")
-        new_url = input(" URL шлюза: ").strip()
-        if new_url:
-            if not new_url.startswith("http://") and not new_url.startswith("https://"):
-                new_url = f"https://{new_url}"
-            cfg["openai_base_url"] = new_url
-            save_config(cfg)
-            set_registry_env("OPENAI_BASE_URL", new_url)
-            update_codex_config_base_url(new_url)
-            broadcast_environment_change()
-            log_ok(f"Сохранен персональный шлюз: {new_url}")
-            time.sleep(1.5)
-
-    elif choice == "3":
-        open_url(f"{GITHUB_URL}#cloudflare-worker", "Инструкция по Cloudflare Worker")
-
-# ==============================================================================
-# ОСНОВНОЙ ФУНКЦИОНАЛ: [3] ВОССТАНОВИТЬ СТАНДАРТНЫЕ НАСТРОЙКИ (ОТКАТ)
+# ВОССТАНОВЛЕНИЕ СТАНДАРТНЫХ НАСТРОЕК (ОТКАТ)
 # ==============================================================================
 def rollback_settings():
-    try:
-        _rollback_settings_impl()
-    except Exception as e:
-        print(f"\n {CLR_RED}[ОШИБКА ОТКАТА]{CLR_RESET}: {e}")
-        traceback.print_exc()
-        input(" Нажмите Enter для продолжения...")
-
-def _rollback_settings_impl():
     print("\n" + "=" * 70)
     print(f"{CLR_BOLD}{CLR_YELLOW}  >>> ВОССТАНОВЛЕНИЕ СТАНДАРТНЫХ НАСТРОЕК (ОТКАТ) <<<{CLR_RESET}")
     print("=" * 70)
 
     cfg = load_config()
 
-    # Шаг 1: Удаление переменных окружения из реестра
-    log_step(1, 3, "Удаление переменных из HKCU\\Environment")
-    for key in ENV_KEYS:
-        delete_registry_env(key)
-        log_ok(f"Удалена переменная: {key}")
-
-    broadcast_environment_change()
+    # Шаг 1: Очистка реестра и проверка прокси
+    log_step(1, 3, "Очистка системного окружения")
+    ensure_system_proxy_disabled()
+    cleanup_global_env_proxies()
+    remove_codex_unlocked_scripts()
+    log_ok("Системный прокси отключен, скрипты codex-unlocked удалены.")
 
     # Шаг 2: Восстановление ярлыков ChatGPT
     log_step(2, 3, "Восстановление оригинальных ярлыков ChatGPT")
     all_shortcuts = list(set(cfg.get("patched_shortcuts", []) + find_chatgpt_shortcuts()))
-
     for lnk in all_shortcuts:
         bak_path = f"{lnk}.bak"
         if os.path.exists(bak_path):
@@ -1019,33 +884,25 @@ def _rollback_settings_impl():
                 continue
             except Exception:
                 pass
-
         if os.path.exists(lnk):
             try:
                 _, args = inspect_shortcut(lnk)
-                if "--proxy-server=" in args or "--ignore-certificate-errors" in args:
-                    cleaned = " ".join([
-                        a for a in args.split()
-                        if not a.startswith("--proxy-server=") and a != "--ignore-certificate-errors"
-                    ])
+                if "--proxy-server=" in args:
+                    cleaned = " ".join([a for a in args.split() if not a.startswith("--proxy-server=")])
                     update_shortcut_args(lnk, cleaned)
                     log_ok(f"Очищены аргументы ярлыка: {os.path.basename(lnk)}")
             except Exception:
                 pass
 
-    # Шаг 3: Остановка локального DPI-обходчика и WARP
-    log_step(3, 3, "Остановка локального ядра обхода блокировок")
+    # Шаг 3: Остановка локального шлюза и WARP
+    log_step(3, 3, "Остановка службы шлюза")
     global ACTIVE_PROXY
     if ACTIVE_PROXY:
         ACTIVE_PROXY.stop()
         ACTIVE_PROXY = None
-    log_ok("Локальный прокси остановлен.")
-    # Отключаем WARP, если он был подключен нами
+    log_ok("Локальный шлюз остановлен.")
     warp_disconnect()
-    log_ok("Cloudflare WARP отключен (если был подключен).")
-
-    # Восстанавливаем config.toml Codex
-    rollback_codex_config_base_url()
+    log_ok("Cloudflare WARP отключен.")
 
     if os.path.exists(CONFIG_FILE):
         try:
@@ -1059,21 +916,15 @@ def _rollback_settings_impl():
     time.sleep(1.5)
 
 # ==============================================================================
-# ПУНКТЫ [4] И [5]: СООБЩЕСТВО И ПОДДЕРЖКА
+# ССЫЛКИ СООБЩЕСТВА
 # ==============================================================================
 def open_url(url: str, title: str):
     print(f"\n Открытие страницы {title}...")
-    opened = False
     try:
-        opened = webbrowser.open_new_tab(url)
+        webbrowser.open_new_tab(url)
+        log_ok("Ссылка открыта в вашем браузере!")
     except Exception:
-        opened = False
-
-    if opened:
-        log_ok(f"Ссылка открыта в вашем браузере!")
-    else:
-        log_info("Не удалось автоматически открыть браузер.")
-        
+        pass
     print(f" Прямая ссылка: {CLR_CYAN}{CLR_BOLD}{url}{CLR_RESET}\n")
     input(" Нажмите Enter для продолжения...")
 
@@ -1090,7 +941,7 @@ def render_banner():
     print(r" \____|_| |_|\__,_|\__|\____|_|    |_|   |_|   \__,_|\__\___|_| |_|\___|_|  ")
     print(f"{CLR_RESET}")
     print(f" {CLR_BOLD}{APP_TITLE}{CLR_RESET} [Версия {APP_VERSION}]")
-    print(f" {CLR_GRAY}Обход блокировок ТСПУ + Шлюз для OpenAI Codex, CLI и VS Code{CLR_RESET}")
+    print(f" {CLR_GRAY}1-Клик обход блокировок ТСПУ & 403 | Полная изоляция (Discord/TG не затрагиваются){CLR_RESET}")
     print("-" * 75)
 
     if is_admin():
@@ -1100,28 +951,18 @@ def render_banner():
 
     global ACTIVE_PROXY
     if ACTIVE_PROXY and ACTIVE_PROXY.is_running:
-        print(f" {CLR_GREEN}●{CLR_RESET} DPI-Ядро: {CLR_GREEN}{CLR_BOLD}АКТИВНО{CLR_RESET} {CLR_GRAY}(127.0.0.1:{ACTIVE_PROXY.port}){CLR_RESET}")
+        print(f" {CLR_GREEN}●{CLR_RESET} Локальный шлюз: {CLR_GREEN}{CLR_BOLD}АКТИВЕН{CLR_RESET} {CLR_GRAY}(127.0.0.1:{ACTIVE_PROXY.port}){CLR_RESET}")
     else:
-        print(f" {CLR_GRAY}○{CLR_RESET} DPI-Ядро: {CLR_GRAY}Готово к запуску{CLR_RESET}")
+        print(f" {CLR_GRAY}○{CLR_RESET} Локальный шлюз: {CLR_GRAY}Готов к запуску{CLR_RESET}")
 
-    cfg = load_config()
-    gateway = cfg.get("openai_base_url", DEFAULT_OPENAI_BASE_URL)
-    print(f" {CLR_CYAN}●{CLR_RESET} Шлюз Codex: {CLR_BOLD}{gateway}{CLR_RESET}")
-
-    curr_http = get_registry_env("HTTP_PROXY")
-    if curr_http:
-        print(f" {CLR_GREEN}●{CLR_RESET} Системный прокси: {CLR_BOLD}{curr_http}{CLR_RESET}")
-    else:
-        print(f" {CLR_GRAY}○{CLR_RESET} Системный прокси: {CLR_GRAY}Не задан (стандартный){CLR_RESET}")
-
-    # Статус WARP
     if ACTIVE_PROXY and ACTIVE_PROXY.upstream_proxy:
-        print(f" {CLR_MAGENTA}●{CLR_RESET} Cloudflare WARP: {CLR_MAGENTA}{CLR_BOLD}АКТИВЕН{CLR_RESET} {CLR_GRAY}(SOCKS5 127.0.0.1:40000 → обход 403){CLR_RESET}")
+        print(f" {CLR_MAGENTA}●{CLR_RESET} Обход 403 (WARP): {CLR_MAGENTA}{CLR_BOLD}АКТИВЕН{CLR_RESET} {CLR_GRAY}(европейский IP для OpenAI){CLR_RESET}")
     elif is_warp_installed():
-        print(f" {CLR_YELLOW}●{CLR_RESET} Cloudflare WARP: {CLR_BOLD}Установлен{CLR_RESET} {CLR_GRAY}(будет подключен при запуске){CLR_RESET}")
+        print(f" {CLR_YELLOW}●{CLR_RESET} Обход 403 (WARP): {CLR_BOLD}Готов{CLR_RESET} {CLR_GRAY}(подключится автоматически при старте){CLR_RESET}")
     else:
-        print(f" {CLR_GRAY}○{CLR_RESET} Cloudflare WARP: {CLR_GRAY}Не установлен (опционально, для 403){CLR_RESET}")
+        print(f" {CLR_GRAY}○{CLR_RESET} Обход 403 (WARP): {CLR_GRAY}Автономный DPI режим{CLR_RESET}")
 
+    print(f" {CLR_GREEN}✔{CLR_RESET} {CLR_BOLD}Discord & Telegram:{CLR_RESET} {CLR_GREEN}100% Прямое соединение (не затрагиваются){CLR_RESET}")
     print("-" * 75)
 
 def main_menu():
@@ -1129,31 +970,38 @@ def main_menu():
         try:
             render_banner()
             print(f" {CLR_BOLD}Главное меню:{CLR_RESET}")
-            print(f"  {CLR_CYAN}[1]{CLR_RESET} {CLR_BOLD}Запустить службу обхода и настроить систему (1 клик){CLR_RESET}")
-            print(f"  {CLR_CYAN}[2]{CLR_RESET} Настроить шлюз OpenAI Codex (OPENAI_BASE_URL)")
-            print(f"  {CLR_CYAN}[3]{CLR_RESET} Восстановить стандартные настройки (Откат)")
-            print(f"  {CLR_CYAN}[4]{CLR_RESET} Сообщество проекта (Telegram)")
-            print(f"  {CLR_CYAN}[5]{CLR_RESET} Поддержать автора (Boosty)")
+            print(f"  {CLR_CYAN}[1]{CLR_RESET} {CLR_BOLD}Запустить службу обхода и ChatGPT (1 клик){CLR_RESET}")
+            print(f"  {CLR_CYAN}[2]{CLR_RESET} Запустить разблокированный OpenAI Codex CLI (в новой консоли)")
+            print(f"  {CLR_CYAN}[3]{CLR_RESET} Запустить ChatGPT Desktop (вручную с параметрами обхода)")
+            print(f"  {CLR_CYAN}[4]{CLR_RESET} Восстановить стандартные настройки (Откат)")
+            print(f"  {CLR_CYAN}[5]{CLR_RESET} Сообщество проекта (Telegram)")
+            print(f"  {CLR_CYAN}[6]{CLR_RESET} Поддержать автора (Boosty)")
             print(f"  {CLR_CYAN}[0]{CLR_RESET} Выход")
             print("-" * 75)
 
-            choice = input(f" Выберите действие [0-5]: ").strip()
+            choice = input(f" Выберите действие [0-6]: ").strip()
 
             if choice == "1":
                 apply_patch_and_run_service()
             elif choice == "2":
-                configure_codex_gateway()
+                ensure_proxy_started()
+                proxy_addr = f"http://{DEFAULT_PROXY_HOST}:{DEFAULT_PROXY_PORT}"
+                launch_unlocked_codex_terminal(proxy_addr)
             elif choice == "3":
-                rollback_settings()
+                ensure_proxy_started()
+                proxy_addr = f"http://{DEFAULT_PROXY_HOST}:{DEFAULT_PROXY_PORT}"
+                auto_restart_chatgpt(find_chatgpt_exe(), f'--proxy-server="{proxy_addr}" --proxy-bypass-list="<-loopback>"')
             elif choice == "4":
-                open_url(COMMUNITY_URL, "Сообщество проекта (Telegram)")
+                rollback_settings()
             elif choice == "5":
+                open_url(COMMUNITY_URL, "Сообщество проекта (Telegram)")
+            elif choice == "6":
                 open_url(BOOSTY_URL, "Поддержать автора (Boosty)")
             elif choice in ("0", "exit", "quit", "q"):
                 print(f"\n{CLR_GRAY}Завершение работы... До встречи!{CLR_RESET}\n")
                 sys.exit(0)
             else:
-                print(f" {CLR_RED}Неверный ввод. Пожалуйста, укажите цифру от 0 до 5.{CLR_RESET}")
+                print(f" {CLR_RED}Неверный ввод. Пожалуйста, укажите цифру от 0 до 6.{CLR_RESET}")
                 time.sleep(1.0)
         except Exception as e:
             print(f"\n {CLR_RED}[ОШИБКА]{CLR_RESET} Непредвиденный сбой: {e}")

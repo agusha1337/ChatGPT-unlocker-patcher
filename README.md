@@ -1,67 +1,56 @@
-# OpenAI Codex & ChatGPT DPI Patcher (Windows)
+# OpenAI Codex & ChatGPT Isolated Patcher (Windows)
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6.svg)](https://microsoft.com/windows)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Zero Downloads](https://img.shields.io/badge/Zero--Downloads-100%25%20Standalone-brightgreen.svg)]()
+[![No Discord/TG Impact](https://img.shields.io/badge/Discord%20%26%20TG-100%25%20Untouched-brightgreen.svg)]()
 
 Автономная утилита в 1 клик для разработчиков и пользователей из России: обеспечивает стабильную работу **OpenAI Codex** (CLI, VS Code, Cursor) и десктопного приложения **ChatGPT**.
 
 ---
 
-## Что решает эта программа?
+## Главные преимущества v5.0.0 (Isolated Edition)
 
-В России при работе с сервисами OpenAI возникают сразу две проблемы:
-1. **Блокировка ТСПУ / РКН**: DPI провайдеров глушит пакеты с открытым SNI (`api.openai.com`, `chatgpt.com`), разрывая соединение при TLS Handshake (`connection reset`, `tls handshake eof`).
-2. **Блокировка 403 Forbidden со стороны OpenAI**: сервера OpenAI отклоняют запросы с российских IP-адресов.
-
-### Наше решение:
-* **Локальное ядро Zapret DPI Bypass (100% бесплатно, 0 рублей)**: встроенная десинхронизация TCP по алгоритму `split2` — дробит заголовок TLS Record на 2-м байте и разрезает запрещенный домен внутри SNI с `TCP_NODELAY`. ТСПУ не распознает трафик, и соединение проходит без покупки VPN и прокси!
-* **Поддержка OpenAI Codex**: в 1 клик настраивает системные переменные `OPENAI_BASE_URL` и изолированный прокси в реестре Windows (`HKCU\Environment`) с рассылкой `WM_SETTINGCHANGE`. Все терминалы, Codex CLI и VS Code подхватывают настройки без перезагрузки.
-* **Снятие 403 Forbidden**: возможность перенаправления запросов через бесплатный европейский Cloudflare Worker (шаблон [cloudflare_worker.js](cloudflare_worker.js) включен в репозиторий, до 100 000 запросов/день бесплатно без карт).
-* **Авто-перезапуск ChatGPT Desktop**: находит установленный клиент (включая версию из Microsoft Store `OpenAI.Codex`), закрывает старый процесс и запускает с флагами прокси.
-* **100% изоляция**: не вмешивается в трафик Discord (включая Запрет), Telegram, онлайн-игр и обычных браузеров.
-* **0 скачиваний и 0 покупок**: никаких сторонних программ, платных подписок или платных прокси. Чистый standalone `.exe`.
+1. **ПОЛНАЯ СЕТЕВАЯ ИЗОЛЯЦИЯ**:
+   * **Discord, Telegram, Steam, браузеры и игры НЕ ЗАТРАГИВАЮТСЯ!**
+   * Системный прокси Windows (`ProxyEnable`) отключен.
+   * Глобальные переменные `HTTP_PROXY` не засоряют систему.
+2. **ChatGPT Desktop**:
+   * Маршрутизируется изолированно через аргументы запуска (`--proxy-server="http://127.0.0.1:10809" --proxy-bypass-list="<-loopback>"`).
+   * Автоматически находит ярлыки, патчит их и перезапускает приложение.
+3. **OpenAI Codex CLI & VS Code**:
+   * Создает изолированный лаунчер `codex-unlocked`, который задает переменные прокси **СТРОГО** для процесса Codex.
+   * Можно запустить разблокированную консоль прямо из меню программы (кнопка `[2]`).
+4. **100% РАБОТА И ОБХОД ОШИБКИ 403**:
+   * Автоматическая бесшовная интеграция с изолированным режимом Cloudflare WARP (`WarpProxy` на порту 40000). В этом режиме WARP не создает сетевых адаптеров и пускает через европейский IP **только трафик OpenAI**, сохраняя ваш пинг в играх и звонках.
+   * Автономный Zapret DPI-байпас (`split2` + SNI десинхронизация) для обхода фильтров ТСПУ.
+5. **0 лишних действий**: нажал **`[1]`** — и всё работает.
 
 ---
 
 ## Быстрый старт (для пользователей)
 
-1. Перейдите во вкладку [Releases](https://github.com/gde-agusha/chatgpt-codex-patcher/releases) и скачайте **`ChatGPT_Patcher.exe`** (~10 МБ).
+1. Скачайте **`ChatGPT_Patcher.exe`** (~10 МБ).
 2. Запустите файл и нажмите **`[1]`**:
-   - Локальная служба активируется на `127.0.0.1:10809` (или свободном порту).
-   - Системные переменные для Codex и VS Code применятся автоматически.
+   - Локальный шлюз активируется на `127.0.0.1:10809`.
    - Десктопный ChatGPT автоматически перезапустится с параметрами обхода.
-3. Просто сверните окно консоли и пользуйтесь Кодексом!
+   - Будет создан изолированный лаунчер `codex-unlocked`.
+3. Просто сверните окно консоли и пользуйтесь ChatGPT и Кодексом!
 
-> **Важно:** Не закрывайте окно на крестик во время работы (просто сверните). Для возврата стандартных настроек системы нажмите **`[R]`** или **`[3]`** (Откат).
+> **Важно:** Не закрывайте окно во время работы (просто сверните). Для полного возврата заводских настроек нажмите **`[R]`** или **`[4]`** (Откат).
 
 ---
 
-## Настройка OpenAI Codex (VS Code, Cursor, CLI)
+## Использование OpenAI Codex CLI
 
-### Использование через Codex CLI
-После запуска программы с опцией `[1]` все терминалы автоматически используют настроенный `OPENAI_BASE_URL`:
+После активации службы (`[1]`) вы можете использовать Codex в любом терминале (PowerShell, CMD, терминал VS Code):
+
 ```powershell
-codex "Напиши функцию на Python"
+codex-unlocked "Напиши функцию на Python"
 ```
 
-### Использование в VS Code / Cursor
-В настройках расширения OpenAI / Codex укажите:
-* **Proxy**: `http://127.0.0.1:10809`
-* **Base URL**: значение из утилиты (по умолчанию `https://api.openai.com/v1` или адрес вашего Cloudflare Worker).
-
----
-
-## Как убрать ошибку 403 Forbidden (Свой Cloudflare Worker)
-
-Если OpenAI блокирует ваш IP со статусом `403 Forbidden`, вы можете поднять собственный бесплатный шлюз за 1 минуту:
-
-1. Зайдите на [dash.cloudflare.com](https://dash.cloudflare.com) ➔ **Workers & Pages** ➔ **Create Application**.
-2. Вставьте код из файла [cloudflare_worker.js](cloudflare_worker.js) и нажмите **Deploy**.
-3. Скопируйте полученную ссылку (например: `https://my-codex.workers.dev/v1`).
-4. В `ChatGPT_Patcher.exe` выберите пункт **`[2]`** и вставьте эту ссылку.
-5. Готово! Теперь все запросы Codex идут через европейские серверы Cloudflare без 403 ошибки.
+Или выберите в меню программы пункт **`[2]`**, чтобы сразу открыть разблокированную консоль!
 
 ---
 
@@ -69,11 +58,11 @@ codex "Напиши функцию на Python"
 
 ```powershell
 # Клонировать репозиторий
-git clone https://github.com/gde-agusha/chatgpt-codex-patcher.git
-cd chatgpt-codex-patcher
+git clone https://github.com/agusha1337/ChatGPT-unlocker-patcher.git
+cd ChatGPT-unlocker-patcher
 
 # Сборка единого .exe через PyInstaller
-python -m PyInstaller --onefile --name "ChatGPT_Patcher" main.py
+python -m PyInstaller --noconfirm --clean ChatGPT_Patcher.spec
 ```
 Собранный исполняемый файл появится в папке `dist/ChatGPT_Patcher.exe`.
 
@@ -81,4 +70,4 @@ python -m PyInstaller --onefile --name "ChatGPT_Patcher" main.py
 
 ## Лицензия
 
-Проект распространяется под свободной лицензией [MIT](LICENSE).
+Распространяется под свободной лицензией MIT.
