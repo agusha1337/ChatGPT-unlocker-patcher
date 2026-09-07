@@ -46,7 +46,7 @@ GITHUB_URL = "https://github.com/gde-agusha/chatgpt-codex-patcher"
 
 DEFAULT_PROXY_PORT = 10809
 DEFAULT_PROXY_HOST = "127.0.0.1"
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_BASE_URL = "https://chatgpt-unlocker-patcher.agushaosnova.workers.dev/v1"
 
 ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL"]
 
@@ -864,9 +864,10 @@ def _apply_patch_and_run_service_impl():
     }
     for key, val in env_updates.items():
         set_registry_env(key, val)
+    update_codex_config_base_url(openai_base_url)
     broadcast_environment_change()
     log_ok(f"Конфигурация Codex зарегистрирована (OPENAI_BASE_URL: {openai_base_url}).")
-    log_ok("VS Code, Codex CLI, Cursor и терминалы настроены.")
+    log_ok("VS Code, Codex CLI, Cursor и терминалы настроены на европейский шлюз.")
 
     # Шаг 3: Поиск, патчинг ярлыков и автоматический перезапуск ChatGPT
     log_step(3, 3, "Подготовка приложения ChatGPT и автоматический запуск")
