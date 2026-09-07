@@ -19,12 +19,20 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Определяем целевой хост (api.openai.com или chatgpt.com)
-    const isChatGPTWeb = url.pathname.startsWith("/backend-api") || 
-                         url.pathname.startsWith("/backend") || 
-                         url.pathname.includes("/codex/responses");
-    const targetHost = isChatGPTWeb ? "chatgpt.com" : "api.openai.com";
-    
+    // Умная маршрутизация: различаем токены сессии ChatGPT (web) и API-ключи (sk-)
+    const authHeader = (request.headers.get("authorization") || "").trim();
+    const isApiKey = authHeader.startsWith("Bearer sk-");
+
+    let targetHost = "api.openai.com";
+    if (!isApiKey && (url.pathname.includes("/responses") || url.pathname.includes("/backend-api"))) {
+      targetHost = "chatgpt.com";
+      url.pathname = "/backend-api/codex/responses";
+    } else if (url.pathname.startsWith("/backend-api") || url.pathname.startsWith("/backend")) {
+      targetHost = "chatgpt.com";
+    } else {
+      targetHost = "api.openai.com";
+    }
+
     url.hostname = targetHost;
     url.protocol = "https:";
 
