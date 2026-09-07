@@ -177,12 +177,15 @@ class DpiBypassProxy:
     Обеспечивает фрагментацию ClientHello с TCP_NODELAY для надежного обхода ТСПУ.
     Поддерживает непрерывный SSE-стриминг без разрывов соединений.
     """
-    def __init__(self, host: str = DEFAULT_PROXY_HOST, port: int = DEFAULT_PROXY_PORT):
+    def __init__(self, host: str = DEFAULT_PROXY_HOST, port: int = DEFAULT_PROXY_PORT,
+                 upstream_proxy: dict = None):
         self.host = host
         self.port = port
         self.server_sock = None
         self.is_running = False
         self.total_connections = 0
+        # upstream_proxy = {"type": "socks5", "host": "127.0.0.1", "port": 40000}
+        self.upstream_proxy = upstream_proxy
 
     def start(self, in_background: bool = True):
         bound = False
@@ -251,6 +254,58 @@ class DpiBypassProxy:
             except Exception:
                 pass
 
+    # Домены OpenAI, для которых нужен WARP (обход геоблока 403)
+    OPENAI_DOMAINS = ("chatgpt", "openai", "oaistatic")
+
+    def _connect_via_socks5(self, proxy_host: str, proxy_port: int,
+                            target_host: str, target_port: int) -> socket.socket:
+        """Устанавливает TCP-соединение через SOCKS5 прокси (Cloudflare WARP)."""
+        sock = socket.create_connection((proxy_host, proxy_port), timeout=15.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # SOCKS5 Handshake: версия 5, 1 метод, без аутентификации
+        sock.sendall(b"\x05\x01\x00")
+        resp = sock.recv(2)
+        if len(resp) < 2 or resp[0] != 0x05 or resp[1] != 0x00:
+            sock.close()
+            raise ConnectionError("SOCKS5 handshake failed")
+        # SOCKS5 CONNECT: версия 5, команда CONNECT, зарезервировано, тип адреса DOMAIN
+        addr_bytes = target_host.encode("ascii")
+        req = (b"\x05\x01\x00\x03" +
+               bytes([len(addr_bytes)]) + addr_bytes +
+               target_port.to_bytes(2, "big"))
+        sock.sendall(req)
+        resp = sock.recv(32)
+        if len(resp) < 2 or resp[1] != 0x00:
+            sock.close()
+            raise ConnectionError(f"SOCKS5 CONNECT failed: status {resp[1] if len(resp) > 1 else 'unknown'}")
+        return sock
+
+    def _connect_to_target(self, target_host: str, target_port: int) -> socket.socket:
+        """
+        Подключается к цели: через WARP SOCKS5 для OpenAI доменов,
+        напрямую для всех остальных.
+        """
+        is_openai = any(d in target_host for d in self.OPENAI_DOMAINS)
+
+        if is_openai and self.upstream_proxy:
+            try:
+                sock = self._connect_via_socks5(
+                    self.upstream_proxy["host"],
+                    self.upstream_proxy["port"],
+                    target_host, target_port
+                )
+                print(f" {CLR_MAGENTA}[WARP]{CLR_RESET} {target_host}:{target_port} "
+                      f"{CLR_GRAY}(через Cloudflare WARP → нероссийский IP){CLR_RESET}")
+                return sock
+            except Exception as e:
+                print(f" {CLR_YELLOW}[WARN]{CLR_RESET} WARP SOCKS5 недоступен ({e}), "
+                      f"подключаемся напрямую...")
+
+        # Прямое подключение (обычные сайты / fallback)
+        sock = socket.create_connection((target_host, target_port), timeout=15.0)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return sock
+
     def _handle_client(self, client_sock: socket.socket):
         remote_sock = None
         try:
@@ -282,8 +337,7 @@ class DpiBypassProxy:
                 else:
                     target_host, target_port = url, 443
 
-                remote_sock = socket.create_connection((target_host, target_port), timeout=15.0)
-                remote_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                remote_sock = self._connect_to_target(target_host, target_port)
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 # 200 Connection Established
@@ -341,8 +395,7 @@ class DpiBypassProxy:
                 target_host = parsed.hostname or self.host
                 target_port = parsed.port or 80
 
-                remote_sock = socket.create_connection((target_host, target_port), timeout=15.0)
-                remote_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                remote_sock = self._connect_to_target(target_host, target_port)
                 if len(req_data) > 3 and req_data[:3] in (b"GET", b"POS", b"PUT", b"DEL", b"OPT"):
                     remote_sock.sendall(req_data[:1])
                     time.sleep(0.008)
@@ -376,14 +429,112 @@ class DpiBypassProxy:
 # Глобальный экземпляр службы прокси
 ACTIVE_PROXY = None
 
+# ==============================================================================
+# CLOUDFLARE WARP: АВТООБНАРУЖЕНИЕ, АВТОПОДКЛЮЧЕНИЕ, ПРОВЕРКА 403
+# ==============================================================================
+WARP_CLI = r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+WARP_SOCKS5_HOST = "127.0.0.1"
+WARP_SOCKS5_PORT = 40000
+
+def is_warp_installed() -> bool:
+    """Проверяет наличие Cloudflare WARP на системе."""
+    return os.path.exists(WARP_CLI)
+
+def is_warp_socks5_alive() -> bool:
+    """Проверяет, слушает ли WARP SOCKS5 прокси на порту 40000."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.5)
+        s.connect((WARP_SOCKS5_HOST, WARP_SOCKS5_PORT))
+        # Отправляем SOCKS5 handshake для верификации
+        s.sendall(b"\x05\x01\x00")
+        resp = s.recv(2)
+        s.close()
+        return len(resp) == 2 and resp[0] == 0x05 and resp[1] == 0x00
+    except Exception:
+        return False
+
+def warp_connect() -> bool:
+    """Подключает Cloudflare WARP и включает режим SOCKS5 прокси."""
+    if not is_warp_installed():
+        return False
+    try:
+        # Установить режим proxy (SOCKS5 на порту 40000)
+        subprocess.run([WARP_CLI, "mode", "proxy"], capture_output=True, timeout=5)
+        time.sleep(0.3)
+        # Подключиться
+        subprocess.run([WARP_CLI, "connect"], capture_output=True, timeout=10)
+        # Дождаться подключения (до 8 секунд)
+        for _ in range(16):
+            time.sleep(0.5)
+            if is_warp_socks5_alive():
+                return True
+        return False
+    except Exception:
+        return False
+
+def warp_disconnect():
+    """Отключает Cloudflare WARP."""
+    if is_warp_installed():
+        try:
+            subprocess.run([WARP_CLI, "disconnect"], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+def test_openai_access_direct() -> bool:
+    """Быстрый тест: доступен ли chatgpt.com напрямую без 403."""
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        sock = socket.create_connection(("chatgpt.com", 443), timeout=5)
+        ssock = ctx.wrap_socket(sock, server_hostname="chatgpt.com")
+        ssock.sendall(b"GET / HTTP/1.1\r\nHost: chatgpt.com\r\nConnection: close\r\n\r\n")
+        resp = ssock.recv(512).decode("latin1", errors="ignore")
+        ssock.close()
+        # Если получили 403 — заблокировано
+        if "403" in resp[:30]:
+            return False
+        return True
+    except Exception:
+        # Если соединение вообще не прошло — тоже недоступно
+        return False
+
 def ensure_proxy_started() -> tuple:
     """Запускает прокси, если не запущен, и возвращает (успех: bool, адрес_прокси: str)."""
     global ACTIVE_PROXY
     if ACTIVE_PROXY and ACTIVE_PROXY.is_running:
         return True, f"http://{ACTIVE_PROXY.host}:{ACTIVE_PROXY.port}"
 
+    # Определяем upstream proxy (WARP) для обхода 403
+    upstream = None
+
+    # Проверяем, нужен ли WARP (есть ли 403 при прямом доступе)
+    direct_ok = test_openai_access_direct()
+
+    if not direct_ok:
+        log_info("OpenAI возвращает 403 — нужен WARP для смены IP...")
+        if is_warp_installed():
+            if is_warp_socks5_alive():
+                log_ok("Cloudflare WARP уже подключен (SOCKS5 на порту 40000).")
+                upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
+            else:
+                log_info("Подключаю Cloudflare WARP автоматически...")
+                if warp_connect():
+                    log_ok("Cloudflare WARP подключен! Трафик OpenAI пойдёт через нероссийский IP.")
+                    upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
+                else:
+                    log_warn("Не удалось подключить WARP. Попробуйте подключить его вручную.")
+        else:
+            log_warn("Cloudflare WARP не установлен!")
+            print(f"    {CLR_YELLOW}►{CLR_RESET} Установите бесплатный Cloudflare WARP из Microsoft Store")
+            print(f"    {CLR_YELLOW}►{CLR_RESET} Или скачайте с {CLR_CYAN}https://1.1.1.1{CLR_RESET}")
+            print(f"    {CLR_YELLOW}►{CLR_RESET} После установки перезапустите патчер — WARP подключится автоматически!")
+    else:
+        log_ok("OpenAI доступен напрямую (нет геоблокировки).")
+
     try:
-        ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT)
+        ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT,
+                                      upstream_proxy=upstream)
         ACTIVE_PROXY.start(in_background=True)
 
         port = ACTIVE_PROXY.port
@@ -722,6 +873,8 @@ def _apply_patch_and_run_service_impl():
 
     print("\n" + "=" * 75)
     log_ok(f"{CLR_BOLD}СЛУЖБА УСПЕШНО ЗАПУЩЕНА И РАБОТАЕТ В РЕАЛЬНОМ ВРЕМЕНИ!{CLR_RESET}")
+    if ACTIVE_PROXY and ACTIVE_PROXY.upstream_proxy:
+        print(f" {CLR_MAGENTA}●{CLR_RESET} {CLR_BOLD}Cloudflare WARP активен{CLR_RESET} — OpenAI трафик идёт через нероссийский IP (обход 403)")
     print(f" {CLR_YELLOW}●{CLR_RESET} {CLR_BOLD}НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО{CLR_RESET} во время работы Codex или ChatGPT (просто сверните его).")
     print(f" {CLR_GRAY}   (Как в Запрете Дискорда: пока окно активно — блокировки обходятся автоматически){CLR_RESET}")
     print(f" {CLR_GREEN}✔{CLR_RESET} {CLR_BOLD}Discord, Telegram и браузеры НЕ затрагиваются{CLR_RESET} и работают в штатном режиме.")
@@ -849,13 +1002,16 @@ def _rollback_settings_impl():
             except Exception:
                 pass
 
-    # Шаг 3: Остановка локального DPI-обходчика
+    # Шаг 3: Остановка локального DPI-обходчика и WARP
     log_step(3, 3, "Остановка локального ядра обхода блокировок")
     global ACTIVE_PROXY
     if ACTIVE_PROXY:
         ACTIVE_PROXY.stop()
         ACTIVE_PROXY = None
     log_ok("Локальный прокси остановлен.")
+    # Отключаем WARP, если он был подключен нами
+    warp_disconnect()
+    log_ok("Cloudflare WARP отключен (если был подключен).")
 
     if os.path.exists(CONFIG_FILE):
         try:
@@ -923,6 +1079,14 @@ def render_banner():
         print(f" {CLR_GREEN}●{CLR_RESET} Системный прокси: {CLR_BOLD}{curr_http}{CLR_RESET}")
     else:
         print(f" {CLR_GRAY}○{CLR_RESET} Системный прокси: {CLR_GRAY}Не задан (стандартный){CLR_RESET}")
+
+    # Статус WARP
+    if ACTIVE_PROXY and ACTIVE_PROXY.upstream_proxy:
+        print(f" {CLR_MAGENTA}●{CLR_RESET} Cloudflare WARP: {CLR_MAGENTA}{CLR_BOLD}АКТИВЕН{CLR_RESET} {CLR_GRAY}(SOCKS5 127.0.0.1:40000 → обход 403){CLR_RESET}")
+    elif is_warp_installed():
+        print(f" {CLR_YELLOW}●{CLR_RESET} Cloudflare WARP: {CLR_BOLD}Установлен{CLR_RESET} {CLR_GRAY}(будет подключен при запуске){CLR_RESET}")
+    else:
+        print(f" {CLR_RED}○{CLR_RESET} Cloudflare WARP: {CLR_GRAY}Не установлен (нужен для обхода 403){CLR_RESET}")
 
     print("-" * 75)
 
