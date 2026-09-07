@@ -514,9 +514,9 @@ def ensure_proxy_started() -> tuple:
                 log_ok("Cloudflare WARP подключен (SOCKS5 127.0.0.1:40000) — мгновенная скорость и обход 403!")
                 upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
             else:
-                log_warn("WARP не ответил, используется локальный Zapret-байпас.")
+                log_info("Режим: Прямой Zapret DPI-байпас (обход ТСПУ).")
     else:
-        log_info("Cloudflare WARP не обнаружен, используется прямой Zapret-байпас.")
+        log_info("Режим: Прямой Zapret DPI-байпас (обход ТСПУ без сторонних программ).")
 
     try:
         ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT,
@@ -1120,7 +1120,7 @@ def render_banner():
     elif is_warp_installed():
         print(f" {CLR_YELLOW}●{CLR_RESET} Cloudflare WARP: {CLR_BOLD}Установлен{CLR_RESET} {CLR_GRAY}(будет подключен при запуске){CLR_RESET}")
     else:
-        print(f" {CLR_RED}○{CLR_RESET} Cloudflare WARP: {CLR_GRAY}Не установлен (нужен для обхода 403){CLR_RESET}")
+        print(f" {CLR_GRAY}○{CLR_RESET} Cloudflare WARP: {CLR_GRAY}Не установлен (опционально, для 403){CLR_RESET}")
 
     print("-" * 75)
 
