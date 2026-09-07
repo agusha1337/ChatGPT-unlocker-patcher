@@ -28,11 +28,33 @@ export default {
     url.hostname = targetHost;
     url.protocol = "https:";
 
+    // Функция полной очистки заголовков от российских IP/страны (удаляет cf-ipcountry, x-forwarded-for и т.д.)
+    function sanitizeHeaders(srcHeaders, host) {
+      const clean = new Headers();
+      for (const [key, value] of srcHeaders.entries()) {
+        const k = key.toLowerCase();
+        // Исключаем любые заголовки, выдающие происхождение запроса (РФ/клиентский IP)
+        if (
+          k.includes("ipcountry") ||
+          k.includes("connecting-ip") ||
+          k.includes("forwarded") ||
+          k.includes("real-ip") ||
+          k.includes("client-ip") ||
+          k === "cf-ray" ||
+          k === "cf-visitor"
+        ) {
+          continue;
+        }
+        clean.set(key, value);
+      }
+      clean.set("Host", host);
+      return clean;
+    }
+
     // Поддержка WebSockets (для интерактивного стриминга Codex и ChatGPT)
     const upgradeHeader = request.headers.get("Upgrade");
     if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
-      const wsHeaders = new Headers(request.headers);
-      wsHeaders.set("Host", targetHost);
+      const wsHeaders = sanitizeHeaders(request.headers, targetHost);
       const wsRequest = new Request(url.toString(), {
         method: request.method,
         headers: wsHeaders,
@@ -54,15 +76,8 @@ export default {
       });
     }
 
-    // Формируем проксируемый запрос
-    const newHeaders = new Headers(request.headers);
-    newHeaders.set("Host", targetHost);
-    
-    // Удаляем заголовки Cloudflare, чтобы избежать конфликтов
-    newHeaders.delete("cf-connecting-ip");
-    newHeaders.delete("cf-ray");
-    newHeaders.delete("cf-ipcountry");
-    newHeaders.delete("cf-visitor");
+    // Формируем чистый проксируемый запрос со скрытым IP
+    const newHeaders = sanitizeHeaders(request.headers, targetHost);
 
     const newRequest = new Request(url.toString(), {
       method: request.method,
