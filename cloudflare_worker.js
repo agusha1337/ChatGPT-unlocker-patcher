@@ -74,8 +74,8 @@ export default {
     try {
       const response = await fetch(newRequest);
       const responseHeaders = new Headers(response.headers);
-      responseHeaders.set("Access-Control-Allow-Origin": "*");
-      responseHeaders.set("Access-Control-Allow-Headers": "*");
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+      responseHeaders.set("Access-Control-Allow-Headers", "*");
       
       return new Response(response.body, {
         status: response.status,
