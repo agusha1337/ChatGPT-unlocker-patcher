@@ -1,1 +1,3 @@
-﻿name = "chatgpt-unlocker-patcher"`nmain = "cloudflare_worker.js"`ncompatibility_date = "2024-09-01"
+name = "chatgpt-unlocker-patcher"
+main = "cloudflare_worker.js"
+compatibility_date = "2024-09-01"

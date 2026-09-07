@@ -1,1 +1,8 @@
-﻿{`n  "name": "chatgpt-unlocker-patcher",`n  "version": "1.0.0",`n  "main": "cloudflare_worker.js",`n  "scripts": {`n    "deploy": "wrangler deploy"`n  }`n}
+{
+  "name": "chatgpt-unlocker-patcher",
+  "version": "1.0.0",
+  "main": "cloudflare_worker.js",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  }
+}
