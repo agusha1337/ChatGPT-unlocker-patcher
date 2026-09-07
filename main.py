@@ -618,6 +618,43 @@ def enable_appcontainer_loopback():
     except Exception:
         pass
 
+def update_codex_config_base_url(url: str):
+    """Синхронизирует base_url напрямую в ~/.codex/config.toml для полной поддержки Codex."""
+    codex_toml = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
+    if not os.path.exists(codex_toml):
+        return
+    try:
+        with open(codex_toml, "r", encoding="utf-8") as f:
+            content = f.read()
+        import re
+        if "[model_providers.custom]" in content:
+            if re.search(r'^\s*base_url\s*=', content, flags=re.MULTILINE):
+                content = re.sub(r'^\s*base_url\s*=.*$', f'base_url = "{url}"', content, flags=re.MULTILINE)
+            else:
+                content = content.replace("[model_providers.custom]\n", f'[model_providers.custom]\nbase_url = "{url}"\n')
+            with open(codex_toml, "w", encoding="utf-8") as f:
+                f.write(content)
+            log_ok(f"Конфигурация Codex обновлена: base_url = {url}")
+    except Exception as e:
+        log_warn(f"Не удалось обновить ~/.codex/config.toml: {e}")
+
+def rollback_codex_config_base_url():
+    """Удаляет кастомный base_url из ~/.codex/config.toml."""
+    codex_toml = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
+    if not os.path.exists(codex_toml):
+        return
+    try:
+        with open(codex_toml, "r", encoding="utf-8") as f:
+            content = f.read()
+        import re
+        if re.search(r'^\s*base_url\s*=.*?\n', content, flags=re.MULTILINE):
+            content = re.sub(r'^\s*base_url\s*=.*?\n', '', content, flags=re.MULTILINE)
+            with open(codex_toml, "w", encoding="utf-8") as f:
+                f.write(content)
+            log_ok("Восстановлен стандартный ~/.codex/config.toml")
+    except Exception:
+        pass
+
 # ==============================================================================
 # УПРАВЛЕНИЕ ЯРЛЫКАМИ (.LNK) И ДЕСКТОПНЫМ CHATGPT (WIN32 + APPX)
 # ==============================================================================
@@ -928,6 +965,7 @@ def configure_codex_gateway():
         cfg["openai_base_url"] = DEFAULT_OPENAI_BASE_URL
         save_config(cfg)
         set_registry_env("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
+        rollback_codex_config_base_url()
         broadcast_environment_change()
         log_ok(f"Установлен стандартный шлюз: {DEFAULT_OPENAI_BASE_URL}")
         time.sleep(1.5)
@@ -941,6 +979,7 @@ def configure_codex_gateway():
             cfg["openai_base_url"] = new_url
             save_config(cfg)
             set_registry_env("OPENAI_BASE_URL", new_url)
+            update_codex_config_base_url(new_url)
             broadcast_environment_change()
             log_ok(f"Сохранен персональный шлюз: {new_url}")
             time.sleep(1.5)
@@ -1012,6 +1051,9 @@ def _rollback_settings_impl():
     # Отключаем WARP, если он был подключен нами
     warp_disconnect()
     log_ok("Cloudflare WARP отключен (если был подключен).")
+
+    # Восстанавливаем config.toml Codex
+    rollback_codex_config_base_url()
 
     if os.path.exists(CONFIG_FILE):
         try:
