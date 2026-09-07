@@ -48,7 +48,7 @@ DEFAULT_PROXY_PORT = 10809
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_OPENAI_BASE_URL = "https://chatgpt-unlocker-patcher.agushaosnova.workers.dev/v1"
 
-ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL"]
+ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL", "NO_PROXY"]
 
 HOME_DIR = os.path.expanduser("~")
 CONFIG_FILE = os.path.join(HOME_DIR, ".chatgpt_patcher_config.json")
@@ -906,16 +906,20 @@ def _apply_patch_and_run_service_impl():
     # Разрешаем AppContainer Loopback (для приложений из Microsoft Store)
     enable_appcontainer_loopback()
 
-    # Настраиваем переменные среды реестра (только для Codex/OpenAI, не трогая системный интернет)
+    # Настраиваем переменные среды реестра для автоматической маршрутизации Codex через европейский узел
     env_updates = {
-        "OPENAI_BASE_URL": openai_base_url
+        "OPENAI_BASE_URL": openai_base_url,
+        "HTTP_PROXY": proxy_address,
+        "HTTPS_PROXY": proxy_address,
+        "NO_PROXY": "localhost,127.0.0.1,*.discord.com,*.discord.gg,*.telegram.org,*.steamcommunity.com,*.steampowered.com,*.vk.com,*.yandex.ru"
     }
     for key, val in env_updates.items():
         set_registry_env(key, val)
-    update_codex_config_base_url(openai_base_url)
+    # Для ChatGPT веб-авторизации оставляем нативный эндпоинт, идущий через прокси
+    rollback_codex_config_base_url()
     broadcast_environment_change()
-    log_ok(f"Конфигурация Codex зарегистрирована (OPENAI_BASE_URL: {openai_base_url}).")
-    log_ok("VS Code, Codex CLI, Cursor и терминалы настроены на европейский шлюз.")
+    log_ok("Конфигурация Codex зарегистрирована (европейский маршрут активен).")
+    log_ok("VS Code, Codex CLI, Cursor и терминалы настроены на обход блокировки.")
 
     # Шаг 3: Поиск, патчинг ярлыков и автоматический перезапуск ChatGPT
     log_step(3, 3, "Подготовка приложения ChatGPT и автоматический запуск")
