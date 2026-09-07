@@ -46,7 +46,7 @@ GITHUB_URL = "https://github.com/gde-agusha/chatgpt-codex-patcher"
 
 DEFAULT_PROXY_PORT = 10809
 DEFAULT_PROXY_HOST = "127.0.0.1"
-DEFAULT_OPENAI_BASE_URL = "https://chatgpt-unlocker-patcher.agushaosnova.workers.dev/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "OPENAI_BASE_URL", "NO_PROXY"]
 
@@ -455,16 +455,16 @@ def is_warp_socks5_alive() -> bool:
         return False
 
 def warp_connect() -> bool:
-    """Подключает Cloudflare WARP и включает режим SOCKS5 прокси."""
+    """Подключает Cloudflare WARP и включает режим SOCKS5 прокси на порту 40000."""
     if not is_warp_installed():
         return False
     try:
         # Установить режим proxy (SOCKS5 на порту 40000)
-        subprocess.run([WARP_CLI, "mode", "proxy"], capture_output=True, timeout=5)
-        time.sleep(0.3)
+        subprocess.run([WARP_CLI, "--accept-tos", "mode", "proxy"], capture_output=True, timeout=5)
+        time.sleep(0.2)
         # Подключиться
-        subprocess.run([WARP_CLI, "connect"], capture_output=True, timeout=10)
-        # Дождаться подключения (до 8 секунд)
+        subprocess.run([WARP_CLI, "--accept-tos", "connect"], capture_output=True, timeout=10)
+        # Дождаться подключения
         for _ in range(16):
             time.sleep(0.5)
             if is_warp_socks5_alive():
@@ -477,7 +477,7 @@ def warp_disconnect():
     """Отключает Cloudflare WARP."""
     if is_warp_installed():
         try:
-            subprocess.run([WARP_CLI, "disconnect"], capture_output=True, timeout=5)
+            subprocess.run([WARP_CLI, "--accept-tos", "disconnect"], capture_output=True, timeout=5)
         except Exception:
             pass
 
@@ -486,68 +486,16 @@ def test_openai_access_direct() -> bool:
     import ssl
     try:
         ctx = ssl.create_default_context()
-        sock = socket.create_connection(("chatgpt.com", 443), timeout=5)
+        sock = socket.create_connection(("chatgpt.com", 443), timeout=3)
         ssock = ctx.wrap_socket(sock, server_hostname="chatgpt.com")
         ssock.sendall(b"GET / HTTP/1.1\r\nHost: chatgpt.com\r\nConnection: close\r\n\r\n")
         resp = ssock.recv(512).decode("latin1", errors="ignore")
         ssock.close()
-        # Если получили 403 — заблокировано
         if "403" in resp[:30]:
             return False
         return True
     except Exception:
-        # Если соединение вообще не прошло — тоже недоступно
         return False
-
-def find_working_eu_proxy() -> dict:
-    """
-    Быстрый многопоточный поиск рабочего европейского SOCKS5 прокси (Германия, Нидерланды, Швеция).
-    Меняет IP для ChatGPT на европейский, полностью ликвидируя ошибку 403 Forbidden!
-    Не требует скачивания никаких программ.
-    """
-    import urllib.request
-    url = "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&country=de,nl,fr,fi,se&timeout=1500&proxy_format=ipport&format=text"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            proxies = [p.strip() for p in resp.read().decode().strip().split("\r\n") if p.strip()]
-    except Exception:
-        return None
-
-    results = []
-    
-    def test_single_proxy(host: str, port: int):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2.0)
-            s.connect((host, port))
-            s.sendall(b"\x05\x01\x00")
-            if s.recv(2) != b"\x05\x00":
-                s.close()
-                return
-            target = b"api.openai.com"
-            s.sendall(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + (443).to_bytes(2, "big"))
-            r2 = s.recv(32)
-            s.close()
-            if len(r2) >= 2 and r2[1] == 0:
-                results.append({"host": host, "port": port, "type": "socks5"})
-        except Exception:
-            pass
-
-    threads = []
-    for p in proxies[:25]:
-        if ":" in p:
-            h, pt = p.split(":", 1)
-            t = threading.Thread(target=test_single_proxy, args=(h, int(pt)), daemon=True)
-            threads.append(t)
-            t.start()
-
-    for t in threads:
-        t.join(timeout=2.0)
-        if results:
-            return results[0]
-
-    return results[0] if results else None
 
 def ensure_proxy_started() -> tuple:
     """Запускает прокси, если не запущен, и возвращает (успех: bool, адрес_прокси: str)."""
@@ -556,25 +504,19 @@ def ensure_proxy_started() -> tuple:
         return True, f"http://{ACTIVE_PROXY.host}:{ACTIVE_PROXY.port}"
 
     upstream = None
-    direct_ok = test_openai_access_direct()
-
-    if not direct_ok:
-        log_info("Обнаружена блокировка 403 Forbidden со стороны Cloudflare/OpenAI.")
-        log_info("Активирую европейский маршрут (Германия/Нидерланды)...")
-        eu_proxy = find_working_eu_proxy()
-        if eu_proxy:
-            log_ok(f"Европейский шлюз активен: {eu_proxy['host']}:{eu_proxy['port']} (ошибка 403 снята!)")
-            upstream = eu_proxy
-        elif is_warp_socks5_alive():
-            log_ok("Cloudflare WARP активен (SOCKS5 на порту 40000).")
-            upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
-        elif is_warp_installed() and warp_connect():
-            log_ok("Cloudflare WARP подключен автоматически.")
+    if is_warp_installed():
+        if is_warp_socks5_alive():
+            log_ok("Cloudflare WARP активен (SOCKS5 127.0.0.1:40000) — мгновенная скорость и обход 403!")
             upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
         else:
-            log_warn("Не удалось подключить внешний узел, используется локальный Zapret-байпас.")
+            log_info("Подключаю Cloudflare WARP для обхода ошибки 403...")
+            if warp_connect():
+                log_ok("Cloudflare WARP подключен (SOCKS5 127.0.0.1:40000) — мгновенная скорость и обход 403!")
+                upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
+            else:
+                log_warn("WARP не ответил, используется локальный Zapret-байпас.")
     else:
-        log_ok("OpenAI доступен напрямую (нет геоблокировки).")
+        log_info("Cloudflare WARP не обнаружен, используется прямой Zapret-байпас.")
 
     try:
         ACTIVE_PROXY = DpiBypassProxy(DEFAULT_PROXY_HOST, DEFAULT_PROXY_PORT,
@@ -898,10 +840,6 @@ def _apply_patch_and_run_service_impl():
     # Шаг 2: Системная интеграция для Codex и API
     log_step(2, 3, "Настройка системной маршрутизации для OpenAI Codex")
     openai_base_url = cfg.get("openai_base_url", DEFAULT_OPENAI_BASE_URL)
-    if "api.openai.com" in openai_base_url:
-        openai_base_url = DEFAULT_OPENAI_BASE_URL
-        cfg["openai_base_url"] = openai_base_url
-        save_config(cfg)
 
     # Разрешаем AppContainer Loopback (для приложений из Microsoft Store)
     enable_appcontainer_loopback()
