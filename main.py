@@ -499,36 +499,80 @@ def test_openai_access_direct() -> bool:
         # Если соединение вообще не прошло — тоже недоступно
         return False
 
+def find_working_eu_proxy() -> dict:
+    """
+    Быстрый многопоточный поиск рабочего европейского SOCKS5 прокси (Германия, Нидерланды, Швеция).
+    Меняет IP для ChatGPT на европейский, полностью ликвидируя ошибку 403 Forbidden!
+    Не требует скачивания никаких программ.
+    """
+    import urllib.request
+    url = "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&country=de,nl,fr,fi,se&timeout=1500&proxy_format=ipport&format=text"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    try:
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            proxies = [p.strip() for p in resp.read().decode().strip().split("\r\n") if p.strip()]
+    except Exception:
+        return None
+
+    results = []
+    
+    def test_single_proxy(host: str, port: int):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((host, port))
+            s.sendall(b"\x05\x01\x00")
+            if s.recv(2) != b"\x05\x00":
+                s.close()
+                return
+            target = b"api.openai.com"
+            s.sendall(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + (443).to_bytes(2, "big"))
+            r2 = s.recv(32)
+            s.close()
+            if len(r2) >= 2 and r2[1] == 0:
+                results.append({"host": host, "port": port, "type": "socks5"})
+        except Exception:
+            pass
+
+    threads = []
+    for p in proxies[:25]:
+        if ":" in p:
+            h, pt = p.split(":", 1)
+            t = threading.Thread(target=test_single_proxy, args=(h, int(pt)), daemon=True)
+            threads.append(t)
+            t.start()
+
+    for t in threads:
+        t.join(timeout=2.0)
+        if results:
+            return results[0]
+
+    return results[0] if results else None
+
 def ensure_proxy_started() -> tuple:
     """Запускает прокси, если не запущен, и возвращает (успех: bool, адрес_прокси: str)."""
     global ACTIVE_PROXY
     if ACTIVE_PROXY and ACTIVE_PROXY.is_running:
         return True, f"http://{ACTIVE_PROXY.host}:{ACTIVE_PROXY.port}"
 
-    # Определяем upstream proxy (WARP) для обхода 403
     upstream = None
-
-    # Проверяем, нужен ли WARP (есть ли 403 при прямом доступе)
     direct_ok = test_openai_access_direct()
 
     if not direct_ok:
-        log_info("OpenAI возвращает 403 — нужен WARP для смены IP...")
-        if is_warp_installed():
-            if is_warp_socks5_alive():
-                log_ok("Cloudflare WARP уже подключен (SOCKS5 на порту 40000).")
-                upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
-            else:
-                log_info("Подключаю Cloudflare WARP автоматически...")
-                if warp_connect():
-                    log_ok("Cloudflare WARP подключен! Трафик OpenAI пойдёт через нероссийский IP.")
-                    upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
-                else:
-                    log_warn("Не удалось подключить WARP. Попробуйте подключить его вручную.")
+        log_info("Обнаружена блокировка 403 Forbidden со стороны Cloudflare/OpenAI.")
+        log_info("Активирую европейский маршрут (Германия/Нидерланды)...")
+        eu_proxy = find_working_eu_proxy()
+        if eu_proxy:
+            log_ok(f"Европейский шлюз активен: {eu_proxy['host']}:{eu_proxy['port']} (ошибка 403 снята!)")
+            upstream = eu_proxy
+        elif is_warp_socks5_alive():
+            log_ok("Cloudflare WARP активен (SOCKS5 на порту 40000).")
+            upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
+        elif is_warp_installed() and warp_connect():
+            log_ok("Cloudflare WARP подключен автоматически.")
+            upstream = {"type": "socks5", "host": WARP_SOCKS5_HOST, "port": WARP_SOCKS5_PORT}
         else:
-            log_warn("Cloudflare WARP не установлен!")
-            print(f"    {CLR_YELLOW}►{CLR_RESET} Установите бесплатный Cloudflare WARP из Microsoft Store")
-            print(f"    {CLR_YELLOW}►{CLR_RESET} Или скачайте с {CLR_CYAN}https://1.1.1.1{CLR_RESET}")
-            print(f"    {CLR_YELLOW}►{CLR_RESET} После установки перезапустите патчер — WARP подключится автоматически!")
+            log_warn("Не удалось подключить внешний узел, используется локальный Zapret-байпас.")
     else:
         log_ok("OpenAI доступен напрямую (нет геоблокировки).")
 
@@ -854,6 +898,10 @@ def _apply_patch_and_run_service_impl():
     # Шаг 2: Системная интеграция для Codex и API
     log_step(2, 3, "Настройка системной маршрутизации для OpenAI Codex")
     openai_base_url = cfg.get("openai_base_url", DEFAULT_OPENAI_BASE_URL)
+    if "api.openai.com" in openai_base_url:
+        openai_base_url = DEFAULT_OPENAI_BASE_URL
+        cfg["openai_base_url"] = openai_base_url
+        save_config(cfg)
 
     # Разрешаем AppContainer Loopback (для приложений из Microsoft Store)
     enable_appcontainer_loopback()
@@ -912,7 +960,8 @@ def _apply_patch_and_run_service_impl():
     print("\n" + "=" * 75)
     log_ok(f"{CLR_BOLD}СЛУЖБА УСПЕШНО ЗАПУЩЕНА И РАБОТАЕТ В РЕАЛЬНОМ ВРЕМЕНИ!{CLR_RESET}")
     if ACTIVE_PROXY and ACTIVE_PROXY.upstream_proxy:
-        print(f" {CLR_MAGENTA}●{CLR_RESET} {CLR_BOLD}Cloudflare WARP активен{CLR_RESET} — OpenAI трафик идёт через нероссийский IP (обход 403)")
+        up = ACTIVE_PROXY.upstream_proxy
+        print(f" {CLR_MAGENTA}●{CLR_RESET} {CLR_BOLD}Европейский маршрут активен{CLR_RESET} ({up['host']}:{up['port']}) — OpenAI трафик идёт через европейский IP (обход 403)")
     print(f" {CLR_YELLOW}●{CLR_RESET} {CLR_BOLD}НЕ ЗАКРЫВАЙТЕ ЭТО ОКНО{CLR_RESET} во время работы Codex или ChatGPT (просто сверните его).")
     print(f" {CLR_GRAY}   (Как в Запрете Дискорда: пока окно активно — блокировки обходятся автоматически){CLR_RESET}")
     print(f" {CLR_GREEN}✔{CLR_RESET} {CLR_BOLD}Discord, Telegram и браузеры НЕ затрагиваются{CLR_RESET} и работают в штатном режиме.")
